@@ -167,6 +167,9 @@ const ORIENT_DISPLACEMENT := 0.05
 @export var teleport_distance : float = 1.0
 
 ## Drop held object if teleport distance is reached?
+@export var drop_distance : float = 3.0
+
+## Drop held object if teleport distance is reached?
 @export var drop_on_teleport : bool = true
 
 ## Properties related to physical appearance
@@ -241,6 +244,9 @@ var _controller_tracker: XRControllerTracker
 var _pickup: XRT2Pickup
 var _parent_body: CollisionObject3D
 var _was_parent_basis: Basis
+
+var _force_grip_input : float
+var _force_teleport : bool = false
 
 # Sorted stack of TargetOverride
 var _target_overrides: Array[TargetOverride]
@@ -627,22 +633,41 @@ func _physics_process(delta):
 		return
 
 	# Handle too far from target.
-	if global_position.distance_to(target.origin) > teleport_distance:
-		# TODO: This should move to our pickup logic now that positioning
-		# is handled there.
-		if drop_on_teleport and _pickup:
-			# If we're holding something, drop it!
+	# Handle dropping if too far from target
+	if global_position.distance_to(target.origin) > drop_distance:
+		# If we're holding something, drop it!
+		if _pickup:
 			_pickup.drop_held_object()
 
+	# Handle too far from target.
+	if global_position.distance_to(target.origin) > teleport_distance or _force_teleport:
+		if _pickup and _pickup._picked_up is RigidBody3D: # Only if were holding a rigidbody
+			if _pickup.is_primary(): # Only if its a primary pickup, we dont want to double it for 2 handed holding
+				# Freeze body
+				var rigid_body: RigidBody3D = _pickup._picked_up as RigidBody3D
+				rigid_body.freeze = true
+				
+				# Handle teleporting the object in the hand to its offset position
+				var offset = _pickup._picked_up.global_position - global_position;
+				_pickup._picked_up.global_position = target.origin + offset
+				print("T")
+				
 		freeze = true
 		global_transform = target
-		_was_parent_basis = parent_transform.basis
+		_force_teleport = false
+		
 		return
 
 	# We got this far, make sure we're unfrozen and let Godot position our hand.
-	# Note, if we've picked something up and apply forces to the picked up object,
-	# we want to keep our hands frozen.
 	if freeze:
+		
+		if _pickup and _pickup._picked_up is RigidBody3D:
+			# UnFreeze body
+			var rigid_body: RigidBody3D = _pickup._picked_up as RigidBody3D
+			rigid_body.freeze = false
+			rigid_body.linear_velocity = Vector3()
+			rigid_body.angular_velocity = Vector3()
+				
 		freeze = false
 		linear_velocity = Vector3()
 		angular_velocity = Vector3()
