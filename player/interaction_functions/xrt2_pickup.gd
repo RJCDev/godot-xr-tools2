@@ -81,6 +81,9 @@ static var _highlighted_bodies : Dictionary[Node3D, HighlightedBody]
 ## If false we need to continously hold our grab button, if true we toggle
 ## Note: with keyboard entry toggle is enforced
 @export var grab_toggle : bool = false
+
+## Can we drop the object we are holding?
+@export var can_drop : bool = true
 #endregion
 
 
@@ -226,6 +229,8 @@ func pickup_object(which : PhysicsBody3D):
 			var dest_transform : Transform3D 
 			if _grab_point:
 				dest_transform = _grab_point.get_hand_transform(global_position)
+				_xr_collision_hand.finger_poses = _grab_point.finger_poses
+				_xr_collision_hand.open_finger_poses = _grab_point.open_finger_poses
 				_grab_point._occupied = true
 			else:
 				dest_transform = _get_default_hand_transform(_picked_up, global_position)
@@ -371,6 +376,8 @@ func drop_held_object() -> void:
 	_picked_up = null
 	_grab_point = null
 	_is_primary = false
+	_xr_collision_hand.finger_poses = null
+	_xr_collision_hand.open_finger_poses = null
 
 	var other = picked_up_by(was_picked_up)
 	if other:
@@ -545,8 +552,9 @@ func _process(_delta):
 	if _picked_up:
 		if _is_grab:
 			return
-
-		drop_held_object()
+		
+		if can_drop:
+			drop_held_object()
 		
 	elif not was_grab and _is_grab and _closest_object and is_instance_valid(_closest_object.body):
 		try_pickup.emit(self, _closest_object.body)
@@ -654,7 +662,6 @@ func _get_closest_grabpoint(body : PhysicsBody3D, hand_position : Vector3) -> XR
 			if dist < closest_dist:
 				closest_grab_point = grab_point
 				closest_dist = dist
-
 	return closest_grab_point
 
 
