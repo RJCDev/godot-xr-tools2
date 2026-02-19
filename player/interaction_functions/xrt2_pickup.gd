@@ -82,8 +82,6 @@ static var _highlighted_bodies : Dictionary[Node3D, HighlightedBody]
 ## Note: with keyboard entry toggle is enforced
 @export var grab_toggle : bool = false
 
-## Can we drop the object we are holding?
-@export var can_drop : bool = true
 #endregion
 
 
@@ -191,8 +189,15 @@ func is_primary() -> bool:
 	return _is_primary
 
 
-func _physics_process(delta: float) -> void:
-	_xr_collision_hand._hand_mesh.global_transform = _xr_collision_hand.global_transform
+func _physics_process(delta: float):
+	if _xr_collision_hand and get_picked_up_grab_point():
+		
+		if _tween:
+			if _tween.is_running():
+				return
+				
+		var offset = get_parent().global_transform.inverse() * _xr_collision_hand._hand_mesh.global_transform
+		_xr_collision_hand.global_transform = get_picked_up_grab_point().global_transform * offset
 
 ## Pick up this object
 func pickup_object(which : PhysicsBody3D):
@@ -200,34 +205,15 @@ func pickup_object(which : PhysicsBody3D):
 		push_warning("Picking up objects other than Rigidbody and PhysicalBone3D is currently disabled.")
 		return
 
-	# No longer show highlighted
-	_remove_highlight(which)
-
-	if picked_up_by(which):
-		_is_primary = false
-	else :
-		_is_primary = true
-
-	# Make sure our body doesn't collide with things we've picked up
-	if _is_primary and _xr_player_object:
-		# TODO should create a collision exception manager to ensure we don't undo this too quickly
-		which.add_collision_exception_with(_xr_player_object)
-		_xr_player_object.add_collision_exception_with(which)
-
-	# Remember state
-	_picked_up = which
-	_original_collision_layer = _picked_up.collision_layer
-	_original_collision_mask = _picked_up.collision_mask
-
 	if _xr_collision_hand:
-		if _picked_up is RigidBody3D or _picked_up is PhysicalBone3D:
+		if which is RigidBody3D or which is PhysicalBone3D:
 			# Remember our current hand transform.
 			var hand_transform : Transform3D = _xr_collision_hand.global_transform
 
 			# Find our grab point (if any).
 			# Note, we're already handled our exclusive logic, can ignore that here.
-			_grab_point = _get_closest_grabpoint(_picked_up, global_position)
-
+			_grab_point = _get_closest_grabpoint(which, global_position)
+			
 			# Figure out our grab position
 			var dest_transform : Transform3D 
 			if _grab_point:
@@ -235,13 +221,9 @@ func pickup_object(which : PhysicsBody3D):
 				_xr_collision_hand.finger_poses = _grab_point.finger_poses
 				_xr_collision_hand.open_finger_poses = _grab_point.open_finger_poses
 				_grab_point._occupied = true
-				
-				# Allow the user to drop if not primary
-				if not _grab_point.primary:
-					can_drop = true
 					
-			else:
-				dest_transform = _get_default_hand_transform(_picked_up, global_position)
+			else: # Just  dont pick it up
+				return
 			
 			var offset = get_parent().global_transform.inverse() * hand_transform
 
@@ -253,7 +235,7 @@ func pickup_object(which : PhysicsBody3D):
 			_joint = Generic6DOFJoint3D.new()
 			add_child(_joint, false, Node.INTERNAL_MODE_BACK)
 			_joint.node_a = _xr_collision_hand.get_path()
-			_joint.node_b = _picked_up.get_path()
+			_joint.node_b = which.get_path()
 
 			if _xr_collision_hand._hand_mesh:
 				# Now position our hand mesh where our hand was
@@ -320,9 +302,30 @@ func pickup_object(which : PhysicsBody3D):
 		else:
 			# TODO implement secondary pickup
 			pass
+	
+	# No longer show highlighted
+	_remove_highlight(which)
 
+	if picked_up_by(which):
+		_is_primary = false
+	else :
+		_is_primary = true
+
+	# Make sure our body doesn't collide with things we've picked up
+	if _is_primary and _xr_player_object:
+		# TODO should create a collision exception manager to ensure we don't undo this too quickly
+		which.add_collision_exception_with(_xr_player_object)
+		which.set_collision_layer_value(3, true)
+		which.set_collision_layer_value(4, false)
+		_xr_player_object.add_collision_exception_with(which)
+
+	# Remember state
+	_picked_up = which
+	_original_collision_layer = _picked_up.collision_layer
+	_original_collision_mask = _picked_up.collision_mask
 	# TODO set pose overrule based on what we've picked up (if applicable)
-
+	
+	_picked_up.remove_from_group("dropped")
 	picked_up.emit(self, which)
 
 ## Drop object we're currently holding
@@ -394,7 +397,10 @@ func drop_held_object() -> void:
 	elif _xr_player_object:
 		was_picked_up.add_collision_exception_with(_xr_player_object)
 		_xr_player_object.add_collision_exception_with(was_picked_up)
-
+	
+	if _is_primary:
+		was_picked_up.add_to_group("dropped")
+		
 	dropped.emit(self, was_picked_up)
 	
 #endregion
@@ -561,7 +567,8 @@ func _process(_delta):
 		if _is_grab:
 			return
 		
-		if can_drop:
+		# Allow dropping if we are not primary so we can detach our hands
+		if !_is_primary:
 			drop_held_object()
 		
 	elif not was_grab and _is_grab and _closest_object and is_instance_valid(_closest_object.body):
@@ -589,7 +596,7 @@ func _process(_delta):
 		if _closest_object.grab_point and _closest_object.grab_point.highlight_mode == 1 and picked_up_by(_closest_object.body):
 			# Don't highlight for two handed pickup
 			return
-
+	
 		_add_highlight(_closest_object.body)
 #endregion
 
@@ -617,7 +624,7 @@ func _get_hand_collision_rids() -> Array[RID]:
 func _get_closest_grabpoint(body : PhysicsBody3D, hand_position : Vector3) -> XRT2GrabPoint:
 	# Check any applicable grab point on the body first
 	var is_left_hand : bool = _is_left_hand()
-	var closest_grab_point : XRT2GrabPoint
+	var closest_grab_point : XRT2GrabPoint = null
 	var closest_dist : float = 9999.99
 	
 	var has_primary : bool = false # Do we have any primary grab points
@@ -710,6 +717,9 @@ func _get_closest() -> ClosestObject:
 	var closest_dist : float = 9999999.99
 
 	for body : Node3D in overlapping_bodies:
+		if _picked_up:
+			# Ignore if we already picked up with this hand
+			continue
 		if body.is_ancestor_of(self):
 			# Ignore any of our parents
 			continue
@@ -794,7 +804,7 @@ func _highlight_meshes(node : Node3D) -> Dictionary[MeshInstance3D, Material]:
 # Add highlight to this object.
 # If there is already a highlight, we add ourself.
 func _add_highlight(node : Node3D):
-	print("add highlight: " + node.name)
+	
 	if _highlighted_bodies.has(node):
 		if not _highlighted_bodies[node].pickups.has(self):
 			_highlighted_bodies[node].pickups.push_back(self)

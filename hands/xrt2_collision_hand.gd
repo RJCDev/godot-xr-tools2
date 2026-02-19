@@ -653,8 +653,7 @@ func _physics_process(delta):
 				# Handle teleporting the object in the hand to its offset position
 				var offset = _pickup._picked_up.global_position - global_position;
 				_pickup._picked_up.global_position = target.origin + offset
-				print("T")
-				
+			
 		freeze = true
 		global_transform = target
 		_force_teleport = false
