@@ -302,6 +302,9 @@ func get_collision_parent() -> CollisionObject3D:
 
 
 #region Public Action API
+func _force_teleport_pickup():
+	_force_teleport = true
+
 ## Returns true if hand tracking API is used
 func get_is_hand_tracking() -> bool:
 	if _hand_tracker and _hand_tracker.has_tracking_data:
