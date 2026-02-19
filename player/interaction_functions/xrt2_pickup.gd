@@ -191,6 +191,9 @@ func is_primary() -> bool:
 	return _is_primary
 
 
+func _physics_process(delta: float) -> void:
+	_xr_collision_hand._hand_mesh.global_transform = _xr_collision_hand.global_transform
+
 ## Pick up this object
 func pickup_object(which : PhysicsBody3D):
 	if not which is RigidBody3D and not which is PhysicalBone3D:
@@ -232,6 +235,11 @@ func pickup_object(which : PhysicsBody3D):
 				_xr_collision_hand.finger_poses = _grab_point.finger_poses
 				_xr_collision_hand.open_finger_poses = _grab_point.open_finger_poses
 				_grab_point._occupied = true
+				
+				# Allow the user to drop if not primary
+				if not _grab_point.primary:
+					can_drop = true
+					
 			else:
 				dest_transform = _get_default_hand_transform(_picked_up, global_position)
 			
@@ -786,6 +794,7 @@ func _highlight_meshes(node : Node3D) -> Dictionary[MeshInstance3D, Material]:
 # Add highlight to this object.
 # If there is already a highlight, we add ourself.
 func _add_highlight(node : Node3D):
+	print("add highlight: " + node.name)
 	if _highlighted_bodies.has(node):
 		if not _highlighted_bodies[node].pickups.has(self):
 			_highlighted_bodies[node].pickups.push_back(self)
