@@ -188,17 +188,6 @@ func get_picked_up_grab_point() -> XRT2GrabPoint:
 func is_primary() -> bool:
 	return _is_primary
 
-
-func _physics_process(delta: float):
-	if _xr_collision_hand and get_picked_up_grab_point():
-		
-		if _tween:
-			if _tween.is_running():
-				return
-				
-		var offset = get_parent().global_transform.inverse() * _xr_collision_hand._hand_mesh.global_transform
-		_xr_collision_hand.global_transform = get_picked_up_grab_point().global_transform * offset
-
 ## Pick up this object
 func pickup_object(which : PhysicsBody3D):
 	if not which is RigidBody3D and not which is PhysicalBone3D:
@@ -228,7 +217,7 @@ func pickup_object(which : PhysicsBody3D):
 			var offset = get_parent().global_transform.inverse() * hand_transform
 
 			# Now move our hand in the correct grab position
-			_xr_collision_hand.global_transform = dest_transform * offset
+			_xr_collision_hand.add_target_override(_grab_point, 1, offset)
 			_xr_collision_hand.force_update_transform()
 
 			# Now join our hand and the object we're picking up together
@@ -372,7 +361,9 @@ func drop_held_object() -> void:
 
 			if _xr_collision_hand._hand_mesh:
 				_xr_collision_hand._hand_mesh.transform = Transform3D()
-
+				
+			_xr_collision_hand.remove_target_override(_grab_point)
+			
 	elif _xr_controller:
 		_picked_up.collision_layer = _original_collision_layer
 		_picked_up.collision_mask = _original_collision_mask
@@ -382,7 +373,10 @@ func drop_held_object() -> void:
 			_picked_up.freeze = false
 			_picked_up.linear_velocity = linear_velocity
 			_picked_up.angular_velocity = angular_velocity
-
+	
+	if _is_primary:
+		was_picked_up.add_to_group("dropped")
+		
 	# And we're no longer holding something
 	_picked_up = null
 	_grab_point = null
@@ -398,9 +392,6 @@ func drop_held_object() -> void:
 		was_picked_up.add_collision_exception_with(_xr_player_object)
 		_xr_player_object.add_collision_exception_with(was_picked_up)
 	
-	if _is_primary:
-		was_picked_up.add_to_group("dropped")
-		
 	dropped.emit(self, was_picked_up)
 	
 #endregion

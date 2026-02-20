@@ -102,12 +102,16 @@ func _physics_process(_delta):
 func drop_object() -> void:
 	if not is_instance_valid(picked_up_object):
 		return
-
+		
+	picked_up_object.remove_from_group("snapped_zone")
+	
 	# let go of this object
 	$Held.remote_path = ""
 	picked_up_object = null
 	has_dropped.emit()
 	highlight_updated.emit(self, enabled)
+	
+	
 
 
 # Check for an initial object pickup
@@ -205,6 +209,7 @@ func pick_up_object(target: Node3D) -> void:
 		picked_up_object.set_collision_layer_value(4, false) # Not a dropped object anymore
 		print("pickup " + picked_up_object.name)
 	
+	picked_up_object.add_to_group("dropped") # Just in case
 	picked_up_object.add_to_group("snapped_zone")
 
 # Called when the enabled property has been modified
