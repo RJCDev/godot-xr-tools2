@@ -621,12 +621,8 @@ func _physics_process(delta):
 	if _ghost_mesh:
 		_ghost_mesh.global_transform = target
 
-	# If we have a target override, just place it there!
 	if _target_override:
-		freeze = true
-		global_transform = _target_override.global_transform * _target_offset
-		_was_parent_basis = parent_transform.basis
-		return
+		target = _target_override.global_transform * _target_offset
 
 	# Handle TELEPORT
 	if mode == CollisionHandMode.TELEPORT:
