@@ -3,7 +3,7 @@ extends Area3D
 
 
 ## Signal emitted when the snap-zone picks something up
-signal has_picked_up(what)
+signal has_picked_up(what : PhysicsBody3D)
 
 ## Signal emitted when the snap-zone drops something
 signal has_dropped
@@ -24,6 +24,9 @@ enum SnapMode {
 
 ## Enable or disable snap-zone
 @export var enabled : bool = true: set = _set_enabled
+
+## Should we disable the object inside when we pickup?
+@export var freeze_on_pickup : bool = true
 
 ## Optional audio stream to play when a object snaps to the zone
 @export var stash_sound : AudioStream
@@ -177,7 +180,8 @@ func has_snapped_object() -> bool:
 
 
 # Pick up the specified object
-func pick_up_object(target: Node3D) -> void:
+func pick_up_object(target: PhysicsBody3D) -> void:
+	
 	# check if already holding an object
 	if is_instance_valid(picked_up_object):
 		# skip if holding the target object
@@ -209,8 +213,13 @@ func pick_up_object(target: Node3D) -> void:
 		picked_up_object.set_collision_layer_value(4, false) # Not a dropped object anymore
 		print("pickup " + picked_up_object.name)
 	
-	picked_up_object.add_to_group("dropped") # Just in case
-	picked_up_object.add_to_group("snapped_zone")
+	if target is RigidBody3D:
+		target.freeze = freeze_on_pickup
+	else:
+		picked_up_object.add_to_group("dropped") # Just in case
+		picked_up_object.add_to_group("snapped_zone")
+	
+	
 
 # Called when the enabled property has been modified
 func _set_enabled(p_enabled: bool) -> void:
