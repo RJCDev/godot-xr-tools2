@@ -217,7 +217,7 @@ func pickup_object(which : PhysicsBody3D):
 			var offset = get_parent().global_transform.inverse() * hand_transform
 
 			# Now move our hand in the correct grab position
-			_xr_collision_hand.add_target_override(_grab_point, 1, offset)
+			_xr_collision_hand.global_transform = dest_transform * offset
 			_xr_collision_hand.force_update_transform()
 
 			# Now join our hand and the object we're picking up together
@@ -361,8 +361,6 @@ func drop_held_object() -> void:
 
 			if _xr_collision_hand._hand_mesh:
 				_xr_collision_hand._hand_mesh.transform = Transform3D()
-				
-			_xr_collision_hand.remove_target_override(_grab_point)
 			
 	elif _xr_controller:
 		_picked_up.collision_layer = _original_collision_layer
@@ -513,6 +511,16 @@ func _exit_tree():
 	if _pickup_handlers.has(self):
 		_pickup_handlers.erase(self)
 
+# Move hand to grab point if holding
+func _physics_process(delta: float):
+	if enabled:
+		if _xr_collision_hand and get_picked_up_grab_point():
+			if _tween:
+				if _tween.is_running():
+					return
+					
+			var offset = get_parent().global_transform.inverse() * _xr_collision_hand._hand_mesh.global_transform
+			_xr_collision_hand.global_transform = get_picked_up_grab_point().global_transform * offset
 
 func _process(_delta):
 	# Don't run in editor
