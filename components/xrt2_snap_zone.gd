@@ -215,6 +215,8 @@ func pick_up_object(target: PhysicsBody3D) -> void:
 	
 	if target is RigidBody3D:
 		target.freeze = freeze_on_pickup
+		target.collision_layer = 0
+		target.collision_mask = 0
 	else:
 		picked_up_object.add_to_group("dropped") # Just in case
 		picked_up_object.add_to_group("snapped_zone")
