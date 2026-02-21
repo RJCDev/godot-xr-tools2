@@ -6,7 +6,7 @@ extends Area3D
 signal has_picked_up(what : PhysicsBody3D)
 
 ## Signal emitted when the snap-zone drops something
-signal has_dropped(pickable)
+signal has_dropped(what : PhysicsBody3D)
 
 # Signal emitted when the highlight state changes
 signal highlight_updated(pickable, enable)
