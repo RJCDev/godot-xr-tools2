@@ -633,10 +633,15 @@ func _physics_process(delta):
 
 	# Handle too far from target.
 	# Handle dropping if too far from target
-	if global_position.distance_to(target.origin) > drop_distance:
-		# If we're holding something, drop it!
-		if _pickup:
+	if _pickup and _pickup._picked_up:
+		# If we're holding something, drop it if above drop distance!
+		if get_tracked_transform().origin.distance_to(_pickup._picked_up.global_position) > drop_distance:
 			_pickup.drop_held_object()
+			
+		# Do we have a grab point?
+		if _pickup.get_picked_up_grab_point():			
+			var offset = _pickup.get_parent().global_transform.inverse() * global_transform
+			_hand_mesh.global_transform = _pickup.get_picked_up_grab_point().global_transform * offset
 
 	# Handle too far from target.
 	if global_position.distance_to(target.origin) > teleport_distance or _force_teleport:
@@ -689,7 +694,7 @@ func _physics_process(delta):
 			parent_angular_velocity = XRT2Helper.rotation_to_axis_angle(_was_parent_basis, parent_transform.basis) / delta
 
 	# TODO: If physics runs at a higher update rate than we get tracking,
-	# we should adjust our proportional value accordingly.
+	# we should adjust our proportional value accordingly
 
 	# Apply linear motion to hands.
 	XRT2Helper.apply_force_to_target(delta, self, target.origin,

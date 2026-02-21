@@ -511,15 +511,6 @@ func _exit_tree():
 	if _pickup_handlers.has(self):
 		_pickup_handlers.erase(self)
 
-# Move hand to grab point if holding
-func _physics_process(delta: float):
-	if _xr_collision_hand and get_picked_up_grab_point():
-		if _tween:
-			if _tween.is_running():
-				return
-		
-		var offset = get_parent().global_transform.inverse() * _xr_collision_hand.global_transform
-		_xr_collision_hand._hand_mesh.global_transform = get_picked_up_grab_point().global_transform * offset
 
 func _process(_delta):
 	# Don't run in editor
