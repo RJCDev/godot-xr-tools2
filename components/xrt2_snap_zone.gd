@@ -6,7 +6,7 @@ extends Area3D
 signal has_picked_up(what : PhysicsBody3D)
 
 ## Signal emitted when the snap-zone drops something
-signal has_dropped
+signal has_dropped(pickable)
 
 # Signal emitted when the highlight state changes
 signal highlight_updated(pickable, enable)
@@ -110,8 +110,8 @@ func drop_object() -> void:
 	
 	# let go of this object
 	$Held.remote_path = ""
+	has_dropped.emit(picked_up_object)
 	picked_up_object = null
-	has_dropped.emit()
 	highlight_updated.emit(self, enabled)
 	
 	
