@@ -26,7 +26,7 @@ enum SnapMode {
 @export var enabled : bool = true: set = _set_enabled
 
 ## Should we disable the object inside when we pickup?
-@export var freeze_on_pickup : bool = true
+@export var disable_on_pickup : bool = true
 
 ## Optional audio stream to play when a object snaps to the zone
 @export var stash_sound : AudioStream
@@ -113,7 +113,6 @@ func drop_object() -> void:
 	has_dropped.emit(picked_up_object)
 	picked_up_object = null
 	highlight_updated.emit(self, enabled)
-	
 	
 
 
@@ -211,13 +210,13 @@ func pick_up_object(target: PhysicsBody3D) -> void:
 		has_picked_up.emit(picked_up_object)
 		highlight_updated.emit(self, false)
 		picked_up_object.set_collision_layer_value(4, false) # Not a dropped object anymore
-		print("pickup " + picked_up_object.name)
 	
 	if target is RigidBody3D:
-		if freeze_on_pickup:	
+		if disable_on_pickup:	
 			target.freeze = true
 			target.collision_layer = 0
 			target.collision_mask = 0
+			enabled = false
 		else:
 			picked_up_object.add_to_group("dropped") # Just in case
 			picked_up_object.add_to_group("snapped_zone")

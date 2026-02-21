@@ -11,6 +11,7 @@ collision_layer = 0
 collision_mask = 4
 monitorable = false
 script = ExtResource("1_cyk88")
+disable_on_pickup = null
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="." unique_id=2123182]
 shape = SubResource("1")
