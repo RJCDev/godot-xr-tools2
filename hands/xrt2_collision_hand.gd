@@ -157,6 +157,8 @@ const ORIENT_DISPLACEMENT := 0.05
 ## Properties related to physics
 @export_group("Physics")
 
+@export var _parent_body: CollisionObject3D
+
 ## Controls the hand collision mode
 @export var mode : CollisionHandMode = CollisionHandMode.COLLIDE:
 	set(value):
@@ -242,7 +244,6 @@ var _hand_skeleton: Skeleton3D
 var _ghost_skeleton: Skeleton3D
 var _controller_tracker: XRControllerTracker
 var _pickup: XRT2Pickup
-var _parent_body: CollisionObject3D
 var _was_parent_basis: Basis
 
 var _force_grip_input : float
@@ -567,7 +568,7 @@ func _ready():
 	top_level = true
 	process_physics_priority = -90
 
-	_parent_body = get_collision_parent()
+	#_parent_body = get_collision_parent()
 	if _parent_body:
 		# Hands shouldn't collide with a parent collision object
 		add_collision_exception_with(_parent_body)
@@ -688,14 +689,13 @@ func _physics_process(delta):
 			parent_angular_velocity = _parent_body.angular_velocity
 		elif _parent_body is CharacterBody3D:
 			parent_linear_velocity = _parent_body.velocity
-
+			print(_parent_body.velocity)
 			# Calculate our parents angular velocity.
 			# Our characterbody also includes our physical movement and we would double account for this.
 			parent_angular_velocity = XRT2Helper.rotation_to_axis_angle(_was_parent_basis, parent_transform.basis) / delta
-
 	# TODO: If physics runs at a higher update rate than we get tracking,
 	# we should adjust our proportional value accordingly
-
+	
 	# Apply linear motion to hands.
 	XRT2Helper.apply_force_to_target(delta, self, target.origin,
 		1.0, parent_linear_velocity, parent_angular_velocity, parent_global_position
