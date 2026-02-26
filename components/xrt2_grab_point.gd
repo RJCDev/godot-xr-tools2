@@ -171,11 +171,11 @@ func _update_show_hand():
 	var orient_to_godot : Basis
 	if left_hand:
 		hand_scene = preload("res://addons/godot-xr-tools2/hands/gltf/LeftHandHumanoid.gltf")
-		bone_name = "LeftHand"
+		bone_name = "LeftMiddleMetacarpal"
 		orient_to_godot = Basis.from_euler(Vector3(0.5 * PI, 0.5 * -PI, 0.0))
 	elif right_hand:
 		hand_scene = preload("res://addons/godot-xr-tools2/hands/gltf/RightHandHumanoid.gltf")
-		bone_name = "RightHand"
+		bone_name = "RightMiddleMetacarpal"
 		orient_to_godot = Basis.from_euler(Vector3(0.5 * PI, PI, 0.5 * PI))
 	else:
 		return
