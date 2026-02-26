@@ -303,7 +303,7 @@ func get_collision_parent() -> CollisionObject3D:
 
 
 #region Public Action API
-func _force_teleport_pickup():
+func _force_teleport_behavior():
 	_force_teleport = true
 
 ## Returns true if hand tracking API is used
@@ -639,7 +639,7 @@ func _physics_process(delta):
 		if get_tracked_transform().origin.distance_to(_pickup._picked_up.global_position) > drop_distance:
 			_pickup.drop_held_object()
 			
-		# Do we have a grab point?
+		# Do we have a grab point? move hand to it visually
 		if _pickup.get_picked_up_grab_point():			
 			var offset = _pickup.get_parent().global_transform.inverse() * global_transform
 			_hand_mesh.global_transform = _pickup.get_picked_up_grab_point().global_transform * offset
@@ -688,8 +688,7 @@ func _physics_process(delta):
 			parent_linear_velocity = _parent_body.linear_velocity
 			parent_angular_velocity = _parent_body.angular_velocity
 		elif _parent_body is CharacterBody3D:
-			parent_linear_velocity = _parent_body.velocity
-			print(_parent_body.velocity)
+			parent_linear_velocity = _parent_body.velocity + _parent_body.get_platform_velocity()
 			# Calculate our parents angular velocity.
 			# Our characterbody also includes our physical movement and we would double account for this.
 			parent_angular_velocity = XRT2Helper.rotation_to_axis_angle(_was_parent_basis, parent_transform.basis) / delta
@@ -898,7 +897,7 @@ func _update_hand_meshes():
 		if _hand_mesh:
 			_hand_mesh.visible = show_hand_mesh
 			add_child(_hand_mesh)
-			_update_hand_material(_hand_mesh, material_override, true)
+			_update_hand_material(_hand_mesh, material_override, false)
 
 			_hand_skeleton = _get_skeleton_node(_hand_mesh)
 
