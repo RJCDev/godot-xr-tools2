@@ -94,7 +94,7 @@ func _physics_process(_delta):
 	for o in _object_in_grab_area:
 		# pick up our target
 		if snap_mode == SnapMode.DROPPED:
-			if o.is_in_group("dropped") and not o.is_in_group("snapped_zone"):
+			if o.is_in_group("dropped") and not o.is_in_group("snap_zone"):
 				pick_up_object(o)
 		else:	
 			pick_up_object(o)
@@ -106,14 +106,13 @@ func drop_object() -> void:
 	if not is_instance_valid(picked_up_object):
 		return
 		
-	picked_up_object.remove_from_group("snapped_zone")
+	picked_up_object.remove_from_group("snap_zone")
 	
 	# let go of this object
 	$Held.remote_path = ""
 	has_dropped.emit(picked_up_object)
 	picked_up_object = null
 	highlight_updated.emit(self, enabled)
-	
 
 
 # Check for an initial object pickup
@@ -151,7 +150,7 @@ func _on_snap_zone_body_exited(target: Node3D) -> void:
 	# Ensure the object is not in our list
 	_object_in_grab_area.erase(target)
 
-	target.remove_from_group("snapped_zone")
+	target.remove_from_group("snap_zone")
 	
 	# Hide highlight when nothing could be snapped
 	if _object_in_grab_area.is_empty() && is_valid_object(target):
@@ -219,7 +218,7 @@ func pick_up_object(target: PhysicsBody3D) -> void:
 			enabled = false
 		else:
 			picked_up_object.add_to_group("dropped") # Just in case
-			picked_up_object.add_to_group("snapped_zone")
+			picked_up_object.add_to_group("snap_zone")
 	
 	
 	
