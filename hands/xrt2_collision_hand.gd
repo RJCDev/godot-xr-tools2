@@ -246,7 +246,6 @@ var _controller_tracker: XRControllerTracker
 var _pickup: XRT2Pickup
 var _was_parent_basis: Basis
 
-var _force_grip_input : float
 var _force_teleport : bool = false
 
 # Sorted stack of TargetOverride
