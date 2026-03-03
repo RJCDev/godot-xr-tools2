@@ -40,7 +40,9 @@ extends Node3D
 ## Enable this grab point.
 @export var enabled : bool = true
 
-@export var primary : bool = false
+@export var primary : bool
+
+@export var toggle : bool
 
 ## Left hand can grab this grab point
 @export var left_hand : bool = true:

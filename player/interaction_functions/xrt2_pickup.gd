@@ -33,7 +33,7 @@ signal try_pickup(by : XRT2Pickup, what : PhysicsBody3D)
 signal picked_up(by : XRT2Pickup, what : PhysicsBody3D)
 
 ## Inform that this hand has dropped this object (also if this object is still held by the other hand).
-signal dropped(by : XRT2Pickup, what : PhysicsBody3D)
+signal dropped(by : XRT2Pickup, what : PhysicsBody3D, primary : bool)
 
 #endregion
 
@@ -210,6 +210,7 @@ func pickup_object(which : PhysicsBody3D):
 				_xr_collision_hand.finger_poses = _grab_point.finger_poses
 				_xr_collision_hand.open_finger_poses = _grab_point.open_finger_poses
 				_grab_point._occupied = true
+				grab_toggle = _grab_point.toggle
 					
 			else: # Just  dont pick it up
 				return
@@ -324,6 +325,7 @@ func drop_held_object() -> void:
 	var linear_velocity : Vector3 = Vector3()
 	var angular_velocity : Vector3 = Vector3()
 	var pose : XRPose = _get_pose()
+	var primary : bool = _is_primary
 	if pose:
 		linear_velocity = pose.linear_velocity
 		angular_velocity = pose.angular_velocity
@@ -390,7 +392,7 @@ func drop_held_object() -> void:
 		was_picked_up.add_collision_exception_with(_xr_player_object)
 		_xr_player_object.add_collision_exception_with(was_picked_up)
 	
-	dropped.emit(self, was_picked_up)
+	dropped.emit(self, was_picked_up, primary)
 	
 #endregion
 
@@ -557,7 +559,7 @@ func _process(_delta):
 			return
 		
 		# Allow dropping if we are not primary so we can detach our hands
-		if !_is_primary or not grab_toggle:
+		if not grab_toggle:
 			drop_held_object()
 		
 	elif not was_grab and _is_grab and _closest_object and is_instance_valid(_closest_object.body):
