@@ -60,6 +60,13 @@ extends Node3D
 		if is_inside_tree():
 			_update_show_hand()
 
+@export var rotation_offset : Vector3:
+	set(value):
+		rotation_offset = value
+
+		if is_inside_tree():
+			_update_show_hand()
+
 ## If [code]true[/code] and object is picked up by this grab point,
 ## it can not be picked up by another grab point.
 @export var exclusive : bool = false
@@ -132,10 +139,10 @@ var _finger_pose_modifier: XRT2FingerPosesModifier3D
 ## Returns the transform for positioning our hand.
 ## [code]hand_position[/code] current position of our hand in global space.
 ## Returned transform is in global space.
-func get_hand_transform(hand_position : Vector3) -> Transform3D:
-	# Note: Default grab point we return our position as is,
-	# but we'll eventually support grab rails and such.
-	return global_transform
+func get_hand_transform(hand_position: Vector3) -> Transform3D:
+	var t = global_transform
+	t.basis = t.basis * Basis.from_euler(Vector3(deg_to_rad(rotation_offset.x), deg_to_rad(rotation_offset.y), deg_to_rad(rotation_offset.z)))
+	return t
 #endregion
 
 
@@ -198,6 +205,8 @@ func _update_show_hand():
 		_finger_pose_modifier.test_trigger = test_trigger
 		_finger_pose_modifier.test_grip = test_grip
 		skeleton.add_child(_finger_pose_modifier)
+		
+
 
 
 func _ready():

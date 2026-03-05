@@ -652,17 +652,9 @@ func _physics_process(delta):
 				rigid_body.freeze = true
 				
 				# Handle teleporting the object in the hand to its offset position
-				var offset = _pickup._picked_up.global_position - global_position;
-				_pickup._picked_up.global_position = target.origin + offset
+				var offset = global_transform.affine_inverse() * _pickup._picked_up.global_transform;
+				_pickup._picked_up.global_transform = target * offset
 				
-				# Make sure we dont have rigidbody children
-				for child in rigid_body.get_children():
-					if child is RigidBody3D:
-						child.freeze = true
-						
-						# Handle teleporting the child object to its offset position
-						var child_offset = child.global_position - global_position;
-						child.global_position = target.origin + child_offset
 			
 		freeze = true
 		global_transform = target
@@ -679,13 +671,7 @@ func _physics_process(delta):
 			rigid_body.freeze = false
 			rigid_body.linear_velocity = Vector3()
 			rigid_body.angular_velocity = Vector3()
-				
-			for child in rigid_body.get_children():
-					if child is RigidBody3D:
-						child.freeze = false
-						child.linear_velocity = Vector3()
-						child.angular_velocity = Vector3()
-						
+		
 		freeze = false
 		linear_velocity = Vector3()
 		angular_velocity = Vector3()

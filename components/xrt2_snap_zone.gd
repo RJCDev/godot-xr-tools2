@@ -25,6 +25,9 @@ enum SnapMode {
 ## Enable or disable snap-zone
 @export var enabled : bool = true: set = _set_enabled
 
+## Do we move the object to the snapzone transform when it is snapped?
+@export var snap_in_place : bool = true
+
 ## Should we disable the object inside when we pickup?
 @export var disable_on_pickup : bool = true
 
@@ -52,16 +55,20 @@ enum SnapMode {
 ## Initial object in snap zone
 @export var initial_object : NodePath
 
+## The layer for the object to go in when enterin the snap zone
+@export_flags_3d_physics var collision_layer_entered: int = 0
+
 
 # Public fields
-var closest_object : Node3D = null
-var picked_up_object : Node3D = null
+var closest_object : PhysicsBody3D = null
+var picked_up_object : PhysicsBody3D = null
 var picked_up_ranged : bool = true
 
 
 # Private fields
 var _object_in_grab_area : Array[PhysicsBody3D] = []
-
+var _remember_collision_layer : int
+var _remember_collision_mask: int
 
 func _ready():
 	# Set collision shape radius
@@ -105,11 +112,16 @@ func _physics_process(_delta):
 func drop_object() -> void:
 	if not is_instance_valid(picked_up_object):
 		return
-		
+	
+	picked_up_object.collision_mask = _remember_collision_mask
+	picked_up_object.collision_layer = _remember_collision_layer
 	picked_up_object.remove_from_group("snap_zone")
 	
 	# let go of this object
-	$Held.remote_path = ""
+	$Held.node_b = ""
+	if picked_up_object is RigidBody3D:
+		picked_up_object.gravity_scale = 1
+		
 	has_dropped.emit(picked_up_object)
 	picked_up_object = null
 	highlight_updated.emit(self, enabled)
@@ -201,8 +213,13 @@ func pick_up_object(target: PhysicsBody3D) -> void:
 				player.stop()
 			player.stream = stash_sound
 			player.play()
-
-	$Held.remote_path = picked_up_object.get_path()
+			
+	if snap_in_place:
+		picked_up_object.global_transform = global_transform
+		
+	$Held.node_b = picked_up_object.get_path()
+	if picked_up_object is RigidBody3D:
+		picked_up_object.gravity_scale = 0
 
 	# If object picked up then emit signal
 	if is_instance_valid(picked_up_object):
@@ -210,16 +227,23 @@ func pick_up_object(target: PhysicsBody3D) -> void:
 		highlight_updated.emit(self, false)
 		picked_up_object.set_collision_layer_value(4, false) # Not a dropped object anymore
 	
+	# Handle collision info
 	if target is RigidBody3D:
 		if disable_on_pickup:	
-			target.freeze = true
 			target.collision_layer = 0
 			target.collision_mask = 0
 			enabled = false
 		else:
-			picked_up_object.add_to_group("dropped") # Just in case
-			picked_up_object.add_to_group("snap_zone")
+			_remember_collision_layer = target.collision_layer
+			_remember_collision_mask = target.collision_mask
+			
+			target.collision_layer = collision_layer_entered
+			target.collision_mask = 0
+			
+	picked_up_object.add_to_group("snap_zone")
+	picked_up_object.add_to_group("dropped") # Just in case
 	
+	close_highlight_updated.emit(target, false)
 	
 	
 

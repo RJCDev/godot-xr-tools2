@@ -11,7 +11,16 @@ collision_layer = 0
 collision_mask = 4
 monitorable = false
 script = ExtResource("1_cyk88")
-disable_on_pickup = null
+collision_layer_entered = 8
+
+[node name="HoldLocation" type="AnimatableBody3D" parent="." unique_id=1430131612]
+sync_to_physics = false
+
+[node name="Held" type="Generic6DOFJoint3D" parent="." unique_id=775271581]
+node_a = NodePath("../HoldLocation")
+linear_spring_x/damping = 50.0
+linear_spring_y/damping = 50.0
+linear_spring_z/damping = 50.0
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="." unique_id=2123182]
 shape = SubResource("1")
@@ -20,9 +29,6 @@ shape = SubResource("1")
 unit_size = 3.0
 max_db = 1.0
 max_distance = 100.0
-
-[node name="Held" type="RemoteTransform3D" parent="." unique_id=964363377]
-update_scale = false
 
 [connection signal="body_entered" from="." to="." method="_on_snap_zone_body_entered"]
 [connection signal="body_exited" from="." to="." method="_on_snap_zone_body_exited"]
