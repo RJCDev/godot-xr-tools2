@@ -69,6 +69,7 @@ var picked_up_ranged : bool = true
 var _object_in_grab_area : Array[PhysicsBody3D] = []
 var _remember_collision_layer : int
 var _remember_collision_mask: int
+var _joint : Generic6DOFJoint3D
 
 func _ready():
 	# Set collision shape radius
@@ -94,6 +95,10 @@ func _physics_process(_delta):
 	
 	# Check if we're picked up and were not in the dropped state (inside the snapzone state)
 	if is_instance_valid(picked_up_object):
+		if picked_up_object is RigidBody3D:
+			picked_up_object.linear_velocity = Vector3.ZERO
+			picked_up_object.angular_velocity = Vector3.ZERO
+			
 		if not picked_up_object.is_in_group("dropped"):
 			drop_object()
 		
@@ -118,7 +123,11 @@ func drop_object() -> void:
 	picked_up_object.remove_from_group("snap_zone")
 	
 	# let go of this object
-	$Held.node_b = ""
+	if (_joint):
+		remove_child(_joint)
+		_joint.queue_free()
+		_joint = null
+		
 	if picked_up_object is RigidBody3D:
 		picked_up_object.gravity_scale = 1
 		
@@ -217,7 +226,11 @@ func pick_up_object(target: PhysicsBody3D) -> void:
 	if snap_in_place:
 		picked_up_object.global_transform = global_transform
 		
-	$Held.node_b = picked_up_object.get_path()
+	_joint = Generic6DOFJoint3D.new()
+	add_child(_joint, false, Node.INTERNAL_MODE_BACK)
+	_joint.node_a = $HoldLocation.get_path()
+	_joint.node_b =  picked_up_object.get_path()
+	
 	if picked_up_object is RigidBody3D:
 		picked_up_object.gravity_scale = 0
 

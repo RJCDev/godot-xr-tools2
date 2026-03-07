@@ -631,36 +631,6 @@ func _physics_process(delta):
 		_was_parent_basis = parent_transform.basis
 		return
 
-	# Handle too far from target.
-	# Handle dropping if too far from target
-	if _pickup and _pickup._picked_up:
-		# If we're holding something, drop it if above drop distance!
-		if get_tracked_transform().origin.distance_to(_pickup._picked_up.global_position) > drop_distance:
-			_pickup.drop_held_object()
-			
-		# Do we have a grab point? move hand to it visually
-		if _pickup.get_picked_up_grab_point():			
-			var offset = _pickup.get_parent().global_transform.inverse() * global_transform
-			_hand_mesh.global_transform = _pickup.get_picked_up_grab_point().global_transform * offset
-
-	# Handle too far from target.
-	if global_position.distance_to(target.origin) > teleport_distance or _force_teleport:
-		if _pickup and _pickup._picked_up is RigidBody3D: # Only if were holding a rigidbody
-			if _pickup.is_primary(): # Only if its a primary pickup, we dont want to double it for 2 handed holding
-				# Freeze body
-				var rigid_body: RigidBody3D = _pickup._picked_up as RigidBody3D
-				rigid_body.freeze = true
-				
-				# Handle teleporting the object in the hand to its offset position
-				var offset = global_transform.affine_inverse() * _pickup._picked_up.global_transform;
-				_pickup._picked_up.global_transform = target * offset
-				
-			
-		freeze = true
-		global_transform = target
-		_force_teleport = false
-		
-		return
 
 	# We got this far, make sure we're unfrozen and let Godot position our hand.
 	if freeze:
@@ -707,12 +677,53 @@ func _physics_process(delta):
 
 	# Remember this in case we need it
 	_was_parent_basis = parent_transform.basis
-
+	
+	# Very weird edge case, just make sure we don't scale weirdly due to copying transforms
+	if scale != Vector3.ONE:
+		scale = Vector3.ONE
+	if _hand_mesh:
+		if _hand_mesh.scale != Vector3.ONE:
+			_hand_mesh.scale = Vector3.ONE
 
 func _process(_delta):
 	if Engine.is_editor_hint():
 		return
-
+	
+	var target : Transform3D = get_tracked_transform()
+	
+	if _target_override:
+		target = _target_override.global_transform * _target_offset
+		
+	# Handle dropping if too far from target
+	if _pickup and _pickup._picked_up:
+		# If we're holding something, drop it if above drop distance!
+		if get_tracked_transform().origin.distance_to(_pickup._picked_up.global_position) > drop_distance:
+			_pickup.drop_held_object()
+			
+		# Do we have a grab point? move hand to it visually
+		if _pickup.get_picked_up_grab_point():
+			var offset = _pickup.get_parent().global_transform.inverse() * global_transform
+			_hand_mesh.global_transform = _pickup.get_picked_up_grab_point().global_transform * offset
+	
+	# Handle too far from target.
+	if global_position.distance_to(target.origin) > teleport_distance or _force_teleport:
+		if _pickup and _pickup._picked_up is RigidBody3D: # Only if were holding a rigidbody
+			if _pickup.is_primary(): # Only if its a primary pickup, we dont want to double it for 2 handed holding
+				# Freeze body
+				var rigid_body: RigidBody3D = _pickup._picked_up as RigidBody3D
+				rigid_body.freeze = true
+				
+				# Handle teleporting the object in the hand to its offset position
+				var offset = global_transform.affine_inverse() * _pickup._picked_up.global_transform;
+				_pickup._picked_up.global_transform = target * offset
+				
+			
+		freeze = true
+		global_transform = target
+		_force_teleport = false
+		
+		return
+		
 	# Our hand should now be positioned so we can do our ghost logic.
 	if _ghost_mesh:
 		_ghost_mesh.visible = false

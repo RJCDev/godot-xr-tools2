@@ -193,7 +193,6 @@ func pickup_object(which : PhysicsBody3D):
 	if not which is RigidBody3D and not which is PhysicalBone3D:
 		push_warning("Picking up objects other than Rigidbody and PhysicalBone3D is currently disabled.")
 		return
-
 	if _xr_collision_hand:
 		if which is RigidBody3D or which is PhysicalBone3D:
 			# Remember our current hand transform.
@@ -202,7 +201,6 @@ func pickup_object(which : PhysicsBody3D):
 			# Find our grab point (if any).
 			# Note, we're already handled our exclusive logic, can ignore that here.
 			_grab_point = _get_closest_grabpoint(which, global_position)
-			
 			# Figure out our grab position
 			var dest_transform : Transform3D 
 			if _grab_point:
@@ -362,8 +360,7 @@ func drop_held_object() -> void:
 				_tween.kill()
 
 			if _xr_collision_hand._hand_mesh:
-				_xr_collision_hand._hand_mesh.transform = Transform3D()
-			
+				_xr_collision_hand._hand_mesh.transform = Transform3D()		
 	elif _xr_controller:
 		_picked_up.collision_layer = _original_collision_layer
 		_picked_up.collision_mask = _original_collision_mask
@@ -391,7 +388,8 @@ func drop_held_object() -> void:
 	elif _xr_player_object:
 		was_picked_up.add_collision_exception_with(_xr_player_object)
 		_xr_player_object.add_collision_exception_with(was_picked_up)
-	
+	grab_toggle = false
+	_is_grab = false
 	dropped.emit(self, was_picked_up, primary)
 	
 #endregion
@@ -561,7 +559,6 @@ func _process(_delta):
 		# Allow dropping if we are not primary so we can detach our hands
 		if not grab_toggle:
 			drop_held_object()
-		
 	elif not was_grab and _is_grab and _closest_object and is_instance_valid(_closest_object.body):
 		try_pickup.emit(self, _closest_object.body)
 		return
