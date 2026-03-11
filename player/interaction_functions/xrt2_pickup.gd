@@ -322,10 +322,6 @@ func pickup_object(which : PhysicsBody3D):
 ## Drop object we're currently holding
 func drop_held_object() -> void:
 	
-	# If were primary and can drop is false, we cant drop, non primaries can always drop
-	if not can_drop and is_primary():
-		return
-	
 	# Get some info from our pose
 	var linear_velocity : Vector3 = Vector3()
 	var angular_velocity : Vector3 = Vector3()
@@ -564,8 +560,9 @@ func _process(_delta):
 			return
 		
 		# Allow dropping if we are not primary so we can detach our hands
-		if not grab_toggle:
+		if can_drop or not is_primary():
 			drop_held_object()
+			
 	elif not was_grab and _is_grab and _closest_object and is_instance_valid(_closest_object.body):
 		try_pickup.emit(self, _closest_object.body)
 		return
