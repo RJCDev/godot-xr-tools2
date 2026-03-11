@@ -248,6 +248,8 @@ var _was_parent_basis: Basis
 
 var _force_teleport : bool = false
 
+var _last_tracked_transform : Transform3D
+
 # Sorted stack of TargetOverride
 var _target_overrides: Array[TargetOverride]
 
@@ -611,18 +613,19 @@ func _physics_process(delta):
 		return
 
 	var target : Transform3D = get_tracked_transform()
-
+	
 	# Ignore when controller is not tracking (ident transform is very unlikely if we are).
 	if target == Transform3D():
-		freeze = true
-		return
-
+		target = _last_tracked_transform
+		
+	# Check target override
+	if _target_override:
+		target = _target_override.global_transform * _target_offset
+		
 	# Always place our ghost mesh at our tracked location.
 	if _ghost_mesh:
 		_ghost_mesh.global_transform = target
 
-	if _target_override:
-		target = _target_override.global_transform * _target_offset
 
 	# Handle TELEPORT
 	if mode == CollisionHandMode.TELEPORT:
@@ -677,6 +680,7 @@ func _physics_process(delta):
 
 	# Remember this in case we need it
 	_was_parent_basis = parent_transform.basis
+	_last_tracked_transform = target
 	
 	# Very weird edge case, just make sure we don't scale weirdly due to copying transforms
 	if scale != Vector3.ONE:
@@ -691,13 +695,16 @@ func _process(_delta):
 	
 	var target : Transform3D = get_tracked_transform()
 	
+	if target == Transform3D():
+		target = _last_tracked_transform
+	
 	if _target_override:
 		target = _target_override.global_transform * _target_offset
 		
 	# Handle dropping if too far from target
 	if _pickup and _pickup._picked_up:
 		# If we're holding something, drop it if above drop distance!
-		if get_tracked_transform().origin.distance_to(_pickup._picked_up.global_position) > drop_distance:
+		if _last_tracked_transform.origin.distance_to(_pickup._picked_up.global_position) > drop_distance:
 			_pickup.drop_held_object()
 			
 		# Do we have a grab point? move hand to it visually

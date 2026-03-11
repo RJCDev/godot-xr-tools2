@@ -82,6 +82,9 @@ static var _highlighted_bodies : Dictionary[Node3D, HighlightedBody]
 ## Note: with keyboard entry toggle is enforced
 @export var grab_toggle : bool = false
 
+# Can we drop our held object ?
+@export var can_drop : bool = true
+	
 #endregion
 
 
@@ -319,6 +322,10 @@ func pickup_object(which : PhysicsBody3D):
 ## Drop object we're currently holding
 func drop_held_object() -> void:
 	
+	# If were primary and can drop is false, we cant drop, non primaries can always drop
+	if not can_drop and is_primary():
+		return
+	
 	# Get some info from our pose
 	var linear_velocity : Vector3 = Vector3()
 	var angular_velocity : Vector3 = Vector3()
@@ -504,7 +511,7 @@ func _ready():
 func _exit_tree():
 	if _closest_object and is_instance_valid(_closest_object.body):
 		_remove_highlight(_closest_object.body)
-
+	
 	drop_held_object()
 
 	# Remove us from the pickup handlers
