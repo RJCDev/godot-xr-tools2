@@ -81,9 +81,6 @@ static var _highlighted_bodies : Dictionary[Node3D, HighlightedBody]
 ## If false we need to continously hold our grab button, if true we toggle
 ## Note: with keyboard entry toggle is enforced
 @export var grab_toggle : bool = false
-
-# Can we drop our held object ?
-@export var can_drop : bool = true
 	
 #endregion
 
@@ -212,6 +209,7 @@ func pickup_object(which : PhysicsBody3D):
 				_xr_collision_hand.open_finger_poses = _grab_point.open_finger_poses
 				_grab_point._occupied = true
 				grab_toggle = _grab_point.toggle
+				_is_primary = _grab_point.primary
 					
 			else: # Just  dont pick it up
 				return
@@ -267,7 +265,7 @@ func pickup_object(which : PhysicsBody3D):
 				# Find our grab point (if any).
 				# Note, we're already handled our exclusive logic, can ignore that here.
 				_grab_point = _get_closest_grabpoint(_picked_up, global_position)
-
+				_is_primary = _grab_point.primary
 				# Figure out our grab position.
 				var dest_transform : Transform3D 
 				if _grab_point:
@@ -296,11 +294,12 @@ func pickup_object(which : PhysicsBody3D):
 	
 	# No longer show highlighted
 	_remove_highlight(which)
-
-	if picked_up_by(which):
-		_is_primary = false
-	else :
-		_is_primary = true
+	
+	# Dynamic, we specify with our grab points
+	#if picked_up_by(which):
+		#_is_primary = false
+	#else :
+		#_is_primary = true
 
 	# Make sure our body doesn't collide with things we've picked up
 	if _is_primary and _xr_player_object:
@@ -558,9 +557,9 @@ func _process(_delta):
 	if _picked_up:
 		if _is_grab:
 			return
-		
+
 		# Allow dropping if we are not primary so we can detach our hands
-		if can_drop or not is_primary():
+		if not is_primary():
 			drop_held_object()
 			
 	elif not was_grab and _is_grab and _closest_object and is_instance_valid(_closest_object.body):
