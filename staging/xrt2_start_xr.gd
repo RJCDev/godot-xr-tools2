@@ -246,7 +246,7 @@ func _on_openxr_session_begun() -> void:
 	var active_rate := _current_refresh_rate if _current_refresh_rate > 0 else 144.0
 	var physics_rate := int(round(active_rate * physics_rate_multiplier))
 	print("Setting physics rate to ", physics_rate)
-	Engine.physics_ticks_per_second = physics_rate
+	#Engine.physics_ticks_per_second = physics_rate
 
 
 # Handle OpenXR visible state
