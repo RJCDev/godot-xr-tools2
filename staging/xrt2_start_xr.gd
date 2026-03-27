@@ -114,7 +114,6 @@ func _ready() -> void:
 			return
 
 		_singleton = self
-		initialize()
 
 
 func _exit_tree():
