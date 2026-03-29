@@ -681,13 +681,7 @@ func _physics_process(delta):
 	# Remember this in case we need it
 	_was_parent_basis = parent_transform.basis
 	_last_tracked_transform = target
-	
-	# Very weird edge case, just make sure we don't scale weirdly due to copying transforms
-	if scale != Vector3.ONE:
-		scale = Vector3.ONE
-	if _hand_mesh:
-		if _hand_mesh.scale != Vector3.ONE:
-			_hand_mesh.scale = Vector3.ONE
+
 
 func _process(_delta):
 	if Engine.is_editor_hint():
