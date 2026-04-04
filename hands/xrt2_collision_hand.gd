@@ -715,13 +715,17 @@ func _process(_delta):
 				rigid_body.freeze = true
 				
 				# Handle teleporting the object in the hand to its offset position
-				var offset = global_transform.affine_inverse() * _pickup._picked_up.global_transform;
-				_pickup._picked_up.global_transform = target * offset
+				var offset = global_transform.affine_inverse() * rigid_body.global_transform;
+				rigid_body.global_transform = target * offset
 				
-			
+				rigid_body.reset_physics_interpolation()
+				
 		freeze = true
 		global_transform = target
 		_force_teleport = false
+		
+		self.reset_physics_interpolation()
+		
 		
 		return
 		
