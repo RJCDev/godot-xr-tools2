@@ -241,6 +241,9 @@ func pickup_object(which : PhysicsBody3D):
 
 				# Now tween
 				_tween.tween_property(_xr_collision_hand._hand_mesh, "transform", Transform3D(), 0.1)
+				
+				# Dont collide with collision hand that picked it up
+				which.add_collision_exception_with(_xr_collision_hand)
 
 		else:
 			# TODO implement other types of grab
@@ -305,16 +308,14 @@ func pickup_object(which : PhysicsBody3D):
 	if _is_primary and _xr_player_object:
 		# TODO should create a collision exception manager to ensure we don't undo this too quickly
 		which.add_collision_exception_with(_xr_player_object)
-		which.set_collision_layer_value(3, true)
-		which.set_collision_layer_value(4, false)
 		_xr_player_object.add_collision_exception_with(which)
+	
 
 	# Remember state
 	_picked_up = which
 	_original_collision_layer = _picked_up.collision_layer
 	_original_collision_mask = _picked_up.collision_mask
-	# TODO set pose overrule based on what we've picked up (if applicable)
-	
+
 	_picked_up.remove_from_group("dropped")
 	picked_up.emit(self, which)
 
@@ -362,7 +363,8 @@ func drop_held_object() -> void:
 				_tween.kill()
 
 			if _xr_collision_hand._hand_mesh:
-				_xr_collision_hand._hand_mesh.transform = Transform3D()		
+				_xr_collision_hand._hand_mesh.transform = Transform3D()	
+
 	elif _xr_controller:
 		_picked_up.collision_layer = _original_collision_layer
 		_picked_up.collision_mask = _original_collision_mask
@@ -388,12 +390,16 @@ func drop_held_object() -> void:
 		# If it isn't already primary, this is now our primary
 		other._is_primary = true
 	elif _xr_player_object:
-		was_picked_up.add_collision_exception_with(_xr_player_object)
-		_xr_player_object.add_collision_exception_with(was_picked_up)
+		was_picked_up.remove_collision_exception_with(_xr_player_object)
+		_xr_player_object.remove_collision_exception_with(was_picked_up)
+	
 	grab_toggle = false
 	_is_grab = false
 	dropped.emit(self, was_picked_up, primary)
 	
+func _re_enable_collision(body: Node3D) -> void:
+	body.remove_collision_exception_with(_xr_collision_hand)
+				
 #endregion
 
 
@@ -490,7 +496,10 @@ func _ready():
 	_detection_area = Area3D.new()
 	_detection_area.add_child(_collision_shape, false, Node.INTERNAL_MODE_FRONT)
 	add_child(_detection_area, false, Node.INTERNAL_MODE_BACK)
-
+	
+	# Re enable the collision with any body we touch when exiting
+	_detection_area.body_exited.connect(_re_enable_collision)
+	
 	if _xr_collision_hand:
 		pass
 	elif _xr_controller:
