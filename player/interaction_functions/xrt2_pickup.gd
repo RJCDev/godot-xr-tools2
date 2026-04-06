@@ -375,9 +375,8 @@ func drop_held_object() -> void:
 			_picked_up.linear_velocity = linear_velocity
 			_picked_up.angular_velocity = angular_velocity
 	
-	if _is_primary:
-		was_picked_up.add_to_group("dropped")
-		
+	was_picked_up.add_to_group("dropped")
+	
 	# And we're no longer holding something
 	_picked_up = null
 	_grab_point = null
