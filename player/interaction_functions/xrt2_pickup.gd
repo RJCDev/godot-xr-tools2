@@ -564,8 +564,9 @@ func _process(_delta):
 		if _is_grab:
 			return
 
-		# Allow dropping if we are not primary so we can detach our hands
-		if not is_primary():
+		# Allow dropping if we are not on a useable grabpoint so we can detach from a grabbed usable
+		# This overrides the behavior 
+		if not _grab_point.useable:
 			drop_held_object()
 			
 	elif not was_grab and _is_grab and _closest_object and is_instance_valid(_closest_object.body):
