@@ -55,6 +55,8 @@ signal input_float_changed(action_name: String, value: float)
 signal input_vector2_changed(action_name: String, vector: Vector2)
 #endregion
 
+@export var enabled := true
+
 ## Modes for collision hand
 enum CollisionHandMode {
 	## Hand is disabled and must be moved externally
@@ -598,7 +600,7 @@ func _ready():
 
 # Handle physics processing
 func _physics_process(delta):
-	if Engine.is_editor_hint():
+	if Engine.is_editor_hint() or not enabled:
 		return
 
 	var parent_transform : Transform3D = Transform3D()
@@ -608,7 +610,6 @@ func _physics_process(delta):
 
 	# Handle DISABLED.
 	if mode == CollisionHandMode.DISABLED:
-		freeze = true
 		_was_parent_basis = parent_transform.basis
 		return
 
@@ -682,9 +683,9 @@ func _physics_process(delta):
 	_was_parent_basis = parent_transform.basis
 	_last_tracked_transform = target
 
-
+# Handle processing
 func _process(_delta):
-	if Engine.is_editor_hint():
+	if Engine.is_editor_hint() or not enabled:
 		return
 	
 	var target : Transform3D = get_tracked_transform()
@@ -725,7 +726,6 @@ func _process(_delta):
 		_force_teleport = false
 		
 		self.reset_physics_interpolation()
-		
 		
 		return
 		
