@@ -624,7 +624,7 @@ func _get_closest_grabpoint(body : PhysicsBody3D, hand_position : Vector3) -> XR
 	var closest_grab_point : XRT2GrabPoint = null
 	var closest_dist : float = 9999.99
 	
-	var has_useable : bool = false # Do we have any usable grab points
+	var has_useable : bool = false # Do we have any useable grab points
 	var primary_left_occupied : bool = false
 	var primary_right_occupied : bool = false
 	
