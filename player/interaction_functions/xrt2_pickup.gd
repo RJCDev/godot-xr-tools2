@@ -650,7 +650,7 @@ func _get_closest_grabpoint(body : PhysicsBody3D, hand_position : Vector3) -> XR
 				if grab_point._occupied: # Its not occupied
 					continue
 				if has_useable:
-					if grab_point.usable: # Its a primary grab point 
+					if grab_point.useable: # Its a primary grab point 
 						if primary_right_occupied: # Its alternative primary is occupied
 							continue
 					else:
