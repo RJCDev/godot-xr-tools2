@@ -209,7 +209,6 @@ func pickup_object(which : PhysicsBody3D):
 				_xr_collision_hand.open_finger_poses = _grab_point.open_finger_poses
 				_grab_point._occupied = true
 				grab_toggle = _grab_point.toggle
-				_is_primary = _grab_point.primary
 					
 			else: # Just  dont pick it up
 				return
@@ -268,7 +267,6 @@ func pickup_object(which : PhysicsBody3D):
 				# Find our grab point (if any).
 				# Note, we're already handled our exclusive logic, can ignore that here.
 				_grab_point = _get_closest_grabpoint(_picked_up, global_position)
-				_is_primary = _grab_point.primary
 				# Figure out our grab position.
 				var dest_transform : Transform3D 
 				if _grab_point:
@@ -298,11 +296,11 @@ func pickup_object(which : PhysicsBody3D):
 	# No longer show highlighted
 	_remove_highlight(which)
 	
-	# Dynamic, we specify with our grab points
-	#if picked_up_by(which):
-		#_is_primary = false
-	#else :
-		#_is_primary = true
+	# Swap primary status to true if its not picked up by something else
+	if picked_up_by(which):
+		_is_primary = false
+	else :
+		_is_primary = true
 
 	# Make sure our body doesn't collide with things we've picked up
 	if _is_primary and _xr_player_object:
@@ -626,7 +624,7 @@ func _get_closest_grabpoint(body : PhysicsBody3D, hand_position : Vector3) -> XR
 	var closest_grab_point : XRT2GrabPoint = null
 	var closest_dist : float = 9999.99
 	
-	var has_primary : bool = false # Do we have any primary grab points
+	var has_useable : bool = false # Do we have any usable grab points
 	var primary_left_occupied : bool = false
 	var primary_right_occupied : bool = false
 	
@@ -634,8 +632,8 @@ func _get_closest_grabpoint(body : PhysicsBody3D, hand_position : Vector3) -> XR
 	for child in body.get_children():
 		if child is XRT2GrabPoint and child.enabled:
 			var grab_point : XRT2GrabPoint = child
-			if grab_point.primary:
-				has_primary = true
+			if grab_point.useable:
+				has_useable = true
 				if grab_point._occupied:
 					if grab_point.left_hand:
 						primary_left_occupied = true
@@ -651,8 +649,8 @@ func _get_closest_grabpoint(body : PhysicsBody3D, hand_position : Vector3) -> XR
 					continue
 				if grab_point._occupied: # Its not occupied
 					continue
-				if has_primary:
-					if grab_point.primary: # Its a primary grab point 
+				if has_useable:
+					if grab_point.usable: # Its a primary grab point 
 						if primary_right_occupied: # Its alternative primary is occupied
 							continue
 					else:
@@ -664,8 +662,8 @@ func _get_closest_grabpoint(body : PhysicsBody3D, hand_position : Vector3) -> XR
 					continue
 				if grab_point._occupied:
 					continue
-				if has_primary:
-					if grab_point.primary:
+				if has_useable:
+					if grab_point.useable:
 						if primary_left_occupied:
 							continue
 					else:

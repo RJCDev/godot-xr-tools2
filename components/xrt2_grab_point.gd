@@ -40,7 +40,7 @@ extends Node3D
 ## Enable this grab point.
 @export var enabled : bool = true
 
-@export var primary : bool
+@export var useable : bool
 
 @export var toggle : bool
 
