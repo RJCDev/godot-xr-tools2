@@ -381,7 +381,7 @@ func drop_held_object() -> void:
 	_is_primary = false
 	_xr_collision_hand.finger_poses = null
 	_xr_collision_hand.open_finger_poses = null
-
+	
 	var other = picked_up_by(was_picked_up)
 	if other:
 		# If it isn't already primary, this is now our primary
@@ -392,6 +392,7 @@ func drop_held_object() -> void:
 	
 	grab_toggle = false
 	_is_grab = false
+	
 	dropped.emit(self, was_picked_up, primary)
 	
 func _re_enable_collision(body: Node3D) -> void:
@@ -403,10 +404,11 @@ func _re_enable_collision(body: Node3D) -> void:
 #region Private export variable update functions
 # Update our enabled status
 func _update_enabled():
-	if _collision_sphere:
-		_collision_shape.disabled = !enabled
-	if _detection_area:
-		_detection_area.monitoring = enabled
+	#if _collision_sphere:
+		#_collision_shape.disabled = !enabled
+	#if _detection_area:
+		#_detection_area.monitoring = enabled
+	pass
 
 	# Q: Do we drop anything we're holding when disabled?
 
