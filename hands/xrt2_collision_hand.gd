@@ -709,7 +709,7 @@ func _process(_delta):
 			
 		# Drop if too far		
 		if distance > drop_distance:
-				_pickup.drop_held_object()
+			_pickup.drop_held_object()
 				
 	# Handle hand too far from target tracking target.
 	if global_position.distance_to(target.origin) > teleport_distance or _force_teleport:
