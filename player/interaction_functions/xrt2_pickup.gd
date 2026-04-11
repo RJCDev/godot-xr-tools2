@@ -362,6 +362,8 @@ func drop_held_object() -> void:
 
 			if _xr_collision_hand._hand_mesh:
 				_xr_collision_hand._hand_mesh.transform = Transform3D()	
+				
+			_xr_collision_hand._force_teleport_allowed = true
 
 	elif _xr_controller:
 		_picked_up.collision_layer = _original_collision_layer
