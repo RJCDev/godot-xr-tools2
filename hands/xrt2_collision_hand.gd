@@ -171,9 +171,6 @@ const ORIENT_DISPLACEMENT := 0.05
 ## Drop held object if teleport distance is reached?
 @export var drop_distance : float = 3.0
 
-## Drop held object if teleport distance is reached?
-@export var drop_on_teleport : bool = true
-
 ## Properties related to physical appearance
 @export_group("Appearance")
 
@@ -246,6 +243,7 @@ var _controller_tracker: XRControllerTracker
 var _pickup: XRT2Pickup
 var _was_parent_basis: Basis
 
+var _force_teleport_allowed : bool = true
 var _force_teleport : bool = false
 
 var _last_tracked_transform : Transform3D
@@ -305,7 +303,8 @@ func get_collision_parent() -> CollisionObject3D:
 
 #region Public Action API
 func _force_teleport_behavior():
-	_force_teleport = true
+	if _force_teleport_allowed:
+		_force_teleport = true
 
 ## Returns true if hand tracking API is used
 func get_is_hand_tracking() -> bool:
