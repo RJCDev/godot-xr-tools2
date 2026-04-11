@@ -32,8 +32,8 @@ signal try_pickup(by : XRT2Pickup, what : PhysicsBody3D)
 ## Inform that this hand has picked up this object (also if this is the second hand).
 signal picked_up(by : XRT2Pickup, what : PhysicsBody3D)
 
-## Inform that this hand has dropped this object (also if this object is still held by the other hand).
-signal dropped(by : XRT2Pickup, what : PhysicsBody3D, primary : bool)
+## Inform that this hand has dropped this object (also if this object is still held by another hand).
+signal dropped(by : XRT2Pickup, what : PhysicsBody3D, lastHand : bool)
 
 #endregion
 
@@ -395,7 +395,7 @@ func drop_held_object() -> void:
 	grab_toggle = false
 	_is_grab = false
 	
-	dropped.emit(self, was_picked_up, primary)
+	dropped.emit(self, was_picked_up, other == null)
 	
 func _re_enable_collision(body: Node3D) -> void:
 	body.remove_collision_exception_with(_xr_collision_hand)
