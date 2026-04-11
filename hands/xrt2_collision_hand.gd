@@ -697,7 +697,7 @@ func _process(_delta):
 	# Handle dropping if too far from target
 	if _pickup and _pickup._picked_up:
 		# If we're holding something, drop it if above drop distance!
-		if _last_tracked_transform.origin.distance_to(_pickup._picked_up.global_position) > drop_distance:
+		if _last_tracked_transform.origin.distance_to(_pickup.get_picked_up_grab_point().global_position) > drop_distance:
 			_pickup.drop_held_object()
 			
 		# Do we have a grab point? move hand to it visually
