@@ -694,18 +694,24 @@ func _process(_delta):
 	if _target_override:
 		target = _target_override.global_transform * _target_offset
 		
-	# Handle dropping if too far from target
+	# Handle dropping if too far from target, and grab point visual movement
 	if _pickup and _pickup._picked_up:
-		# If we're holding something, drop it if above drop distance!
-		if _last_tracked_transform.origin.distance_to(_pickup.get_picked_up_grab_point().global_position) > drop_distance:
-			_pickup.drop_held_object()
+		var grab_point = _pickup.get_picked_up_grab_point()
+		
+		var distance = _last_tracked_transform.origin.distance_to(_pickup._picked_up.global_position)
+		if grab_point:
+			distance = _last_tracked_transform.origin.distance_to(grab_point.global_position)
+
+			# Move hand visually to grab point if tween is finished
+			if not _pickup._tween.is_valid():
+				var offset = _pickup.get_parent().global_transform.inverse() * global_transform
+				_hand_mesh.global_transform = grab_point.global_transform * offset
 			
-		# Do we have a grab point? move hand to it visually
-		if _pickup.get_picked_up_grab_point():
-			var offset = _pickup.get_parent().global_transform.inverse() * global_transform
-			_hand_mesh.global_transform = _pickup.get_picked_up_grab_point().global_transform * offset
-	
-	# Handle too far from target.
+		# Drop if too far		
+		if distance > drop_distance:
+				_pickup.drop_held_object()
+				
+	# Handle hand too far from target tracking target.
 	if global_position.distance_to(target.origin) > teleport_distance or _force_teleport:
 		if _pickup and _pickup._picked_up is RigidBody3D: # Only if were holding a rigidbody
 			if _pickup.is_primary(): # Only if its a primary pickup, we dont want to double it for 2 handed holding
