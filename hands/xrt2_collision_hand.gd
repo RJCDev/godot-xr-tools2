@@ -72,6 +72,10 @@ enum CollisionHandMode {
 const ORIENT_DISPLACEMENT := 0.05
 
 #region Export variables
+
+## Should we emit input?
+@export var emit_input : bool = true
+
 ## Properties related to tracking
 @export_group("Tracking")
 
@@ -1016,20 +1020,24 @@ func _on_player_moved(from_transform : Transform3D, to_transform : Transform3D, 
 
 func _on_button_pressed(action_name: String):
 	# Just chain this.
-	button_pressed.emit(action_name)
+	if (emit_input):
+		button_pressed.emit(action_name)
 
 
 func _on_button_released(action_name: String):
 	# Just chain this.
-	button_released.emit(action_name)
+	if (emit_input):
+		button_released.emit(action_name)
 
 
 func _on_input_float_changed(action_name: String, value: float):
 	# Just chain this.
-	input_float_changed.emit(action_name, value)
+	if (emit_input):
+		input_float_changed.emit(action_name, value)
 
 
 func _on_input_vector2_changed(action_name: String, vector: Vector2):
 	# Just chain this.
-	input_vector2_changed.emit(action_name, vector)
+	if (emit_input):
+		input_vector2_changed.emit(action_name, vector)
 #endregion
