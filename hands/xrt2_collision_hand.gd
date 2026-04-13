@@ -1026,7 +1026,6 @@ func _on_button_pressed(action_name: String):
 
 func _on_button_released(action_name: String):
 	# Just chain this.
-	if (emit_input):
 		button_released.emit(action_name)
 
 
