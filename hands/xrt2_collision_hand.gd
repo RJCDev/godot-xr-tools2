@@ -175,6 +175,18 @@ const ORIENT_DISPLACEMENT := 0.05
 ## Drop held object if teleport distance is reached?
 @export var drop_distance : float = 3.0
 
+## Event-driven obstruction checks (no per-frame cast)
+@export_group("Obstruction Check")
+@export var obstruction_check_enabled : bool = true
+@export_range(0.0, 180.0, 1.0, "radians_as_degrees") var obstruction_rotation_threshold : float = deg_to_rad(30.0)
+@export var obstruction_cast_radius : float = 0.06
+@export var obstruction_surface_offset : float = 0.02
+@export var obstruction_held_object_offset : float = 0.06
+@export_range(1, 8, 1) var obstruction_max_results : int = 4
+@export_flags_3d_physics var obstruction_cast_mask : int = 0
+@export var obstruction_eye_node : NodePath
+@export var obstruction_surface_marker : NodePath
+
 ## Properties related to physical appearance
 @export_group("Appearance")
 
@@ -275,6 +287,9 @@ var _hand_modifier: XRT2HandModifier3D
 
 # Finger pose modifier
 var _finger_pose_modifier: XRT2FingerPosesModifier3D
+var _obstruction_shape_cast: ShapeCast3D
+var _rotation_since_obstruction_check: float = 0.0
+var _pending_obstruction_check: bool = false
 #endregion
 
 
@@ -309,6 +324,7 @@ func get_collision_parent() -> CollisionObject3D:
 func _force_teleport_behavior():
 	if _force_teleport_allowed:
 		_force_teleport = true
+		_pending_obstruction_check = true
 
 ## Returns true if hand tracking API is used
 func get_is_hand_tracking() -> bool:
@@ -598,6 +614,17 @@ func _ready():
 	# Update the target
 	_update_target()
 
+	# Event-driven shape cast helper for line-of-sight hand checks.
+	_obstruction_shape_cast = ShapeCast3D.new()
+	_obstruction_shape_cast.enabled = false
+	_obstruction_shape_cast.collide_with_areas = false
+	_obstruction_shape_cast.collide_with_bodies = true
+	_obstruction_shape_cast.max_results = obstruction_max_results
+	var sphere_shape := SphereShape3D.new()
+	sphere_shape.radius = obstruction_cast_radius
+	_obstruction_shape_cast.shape = sphere_shape
+	add_child(_obstruction_shape_cast, false, Node.INTERNAL_MODE_BACK)
+
 
 # Handle physics processing
 func _physics_process(delta):
@@ -607,7 +634,12 @@ func _physics_process(delta):
 	var parent_transform : Transform3D = Transform3D()
 	var parent : Node3D = get_parent()
 	if parent:
-		parent_transform = parent.global_transform 
+		parent_transform = parent.global_transform
+		var delta_angle := _was_parent_basis.get_rotation_quaternion().angle_to(parent_transform.basis.get_rotation_quaternion())
+		_rotation_since_obstruction_check += abs(delta_angle)
+		if obstruction_check_enabled and _rotation_since_obstruction_check >= obstruction_rotation_threshold:
+			_rotation_since_obstruction_check = 0.0
+			_pending_obstruction_check = true
 
 	# Handle DISABLED.
 	if mode == CollisionHandMode.DISABLED:
@@ -634,6 +666,8 @@ func _physics_process(delta):
 	if mode == CollisionHandMode.TELEPORT:
 		freeze = true
 		global_transform = target
+		if _pending_obstruction_check:
+			_run_obstruction_check()
 		_was_parent_basis = parent_transform.basis
 		return
 
@@ -731,12 +765,17 @@ func _process(_delta):
 		freeze = true
 		global_transform = target
 		_force_teleport = false
-		
+		if _pending_obstruction_check:
+			_run_obstruction_check()
+
 		self.reset_physics_interpolation()
-		
-		
+
+
 		return
-		
+
+	if _pending_obstruction_check:
+		_run_obstruction_check()
+
 	# Our hand should now be positioned so we can do our ghost logic.
 	if _ghost_mesh:
 		_ghost_mesh.visible = false
@@ -1002,6 +1041,135 @@ func _on_skeleton_updated() -> void:
 		_hand_skeleton.set_bone_pose(i, bone_pose)
 
 	skeleton_updated.emit()
+
+
+func _run_obstruction_check() -> void:
+	_pending_obstruction_check = false
+	if not obstruction_check_enabled:
+		return
+	if not _obstruction_shape_cast:
+		return
+
+	var eye_node := _get_eye_node()
+	if not eye_node:
+		return
+
+	var surface_marker := _get_surface_marker()
+	if not surface_marker:
+		return
+
+	var from := eye_node.global_position
+	var to := surface_marker.global_position
+	if from.distance_to(to) < 0.001:
+		return
+
+	var hit := _shape_cast_between(from, to)
+	if hit.is_empty():
+		return
+
+	var normal : Vector3 = hit["normal"]
+	var collision_point : Vector3 = hit["point"]
+	if normal.length() < 0.001:
+		return
+
+	var marker_to_hand := surface_marker.global_transform.affine_inverse() * global_transform
+	var corrected_marker := Transform3D(_build_surface_basis(normal, surface_marker), collision_point + normal * obstruction_surface_offset)
+	var corrected_hand := corrected_marker * marker_to_hand
+
+	if _pickup and _pickup._picked_up is RigidBody3D and _pickup.is_primary():
+		var held_rigid := _pickup._picked_up as RigidBody3D
+		var hand_to_held := global_transform.affine_inverse() * held_rigid.global_transform
+		corrected_hand.origin += normal * obstruction_held_object_offset
+		global_transform = corrected_hand
+		held_rigid.global_transform = global_transform * hand_to_held
+		held_rigid.reset_physics_interpolation()
+	else:
+		global_transform = corrected_hand
+
+	self.reset_physics_interpolation()
+
+
+func _shape_cast_between(from : Vector3, to : Vector3) -> Dictionary:
+	var cast_shape : SphereShape3D = _obstruction_shape_cast.shape as SphereShape3D
+	if cast_shape:
+		cast_shape.radius = obstruction_cast_radius
+
+	_obstruction_shape_cast.collision_mask = collision_mask if obstruction_cast_mask == 0 else obstruction_cast_mask
+	_obstruction_shape_cast.global_position = from
+	_obstruction_shape_cast.target_position = to - from
+	_obstruction_shape_cast.clear_exceptions()
+	_obstruction_shape_cast.add_exception_rid(get_rid())
+	if _parent_body:
+		_obstruction_shape_cast.add_exception_rid(_parent_body.get_rid())
+	if _pickup and _pickup._picked_up:
+		_obstruction_shape_cast.add_exception_rid(_pickup._picked_up.get_rid())
+
+	_obstruction_shape_cast.force_shapecast_update()
+	if not _obstruction_shape_cast.is_colliding():
+		return {}
+
+	var collision_count := _obstruction_shape_cast.get_collision_count()
+	var from_dist := INF
+	var selected := {}
+	for i in collision_count:
+		var collider := _obstruction_shape_cast.get_collider(i)
+		if not collider:
+			continue
+		if collider == self:
+			continue
+		if _pickup and _pickup._picked_up and collider == _pickup._picked_up:
+			continue
+
+		var point := _obstruction_shape_cast.get_collision_point(i)
+		var dist := from.distance_to(point)
+		if dist < from_dist:
+			from_dist = dist
+			selected = {
+				"point": point,
+				"normal": _obstruction_shape_cast.get_collision_normal(i)
+			}
+
+	return selected
+
+
+func _build_surface_basis(surface_normal : Vector3, marker_node : Node3D) -> Basis:
+	var normal := surface_normal.normalized()
+	var marker_forward := -marker_node.global_basis.z
+	var tangent := marker_forward.slide(normal).normalized()
+	if tangent.length() < 0.001:
+		tangent = marker_node.global_basis.x.slide(normal).normalized()
+	if tangent.length() < 0.001:
+		tangent = Vector3.FORWARD.slide(normal).normalized()
+
+	var right := tangent.cross(normal).normalized()
+	var forward := normal.cross(right).normalized()
+	return Basis(right, normal, -forward).orthonormalized()
+
+
+func _get_eye_node() -> Node3D:
+	if not obstruction_eye_node.is_empty():
+		var configured := get_node_or_null(obstruction_eye_node)
+		if configured is Node3D:
+			return configured
+
+	var root := get_parent()
+	if root:
+		root = root.get_parent()
+	if root:
+		for child in root.get_children():
+			if child is XRCamera3D:
+				return child
+
+	return null
+
+
+func _get_surface_marker() -> Node3D:
+	if not obstruction_surface_marker.is_empty():
+		var configured := get_node_or_null(obstruction_surface_marker)
+		if configured is Node3D:
+			return configured
+
+	return self
 
 
 # TODO: Hook this up, this is now part of our locomotion system.
