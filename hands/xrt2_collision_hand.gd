@@ -719,9 +719,8 @@ func _process(_delta):
 	if global_position.distance_to(target.origin) > teleport_distance or _force_teleport:
 		if _pickup and _pickup._picked_up is RigidBody3D: # Only if were holding a rigidbody
 			if _pickup.is_primary(): # Only if its a primary pickup, we dont want to double it for 2 handed holding
-				# Freeze body
 				var rigid_body: RigidBody3D = _pickup._picked_up as RigidBody3D
-				rigid_body.freeze = true
+				#rigid_body.freeze = true
 				
 				# Handle teleporting the object in the hand to its offset position
 				var offset = global_transform.affine_inverse() * rigid_body.global_transform;
