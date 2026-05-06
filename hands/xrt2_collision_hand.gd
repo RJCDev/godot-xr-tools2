@@ -186,6 +186,11 @@ const ORIENT_DISPLACEMENT := 0.05
 @export_flags_3d_physics var obstruction_cast_mask : int = 0
 @export var obstruction_eye_node : NodePath
 @export var obstruction_surface_marker : NodePath
+## Seconds between scheduled obstruction checks as a fallback. [code]0[/code] disables periodic polling.
+@export_range(0.0, 10.0, 0.01, "or_greater", "suffix:s") var obstruction_poll_interval : float = 0.25
+## Run [method _run_obstruction_check] every [method Node._process] tick (for profiling). When [code]true[/code], rotation, teleport-pending, and timer polling do not schedule extra checks.
+@export var collision_check_every_frame : bool = false
+@export var _other_hand : CollisionObject3D;
 
 ## Properties related to physical appearance
 @export_group("Appearance")
@@ -290,6 +295,7 @@ var _finger_pose_modifier: XRT2FingerPosesModifier3D
 var _obstruction_shape_cast: ShapeCast3D
 var _rotation_since_obstruction_check: float = 0.0
 var _pending_obstruction_check: bool = false
+var _obstruction_poll_elapsed: float = 0.0
 #endregion
 
 
@@ -324,7 +330,8 @@ func get_collision_parent() -> CollisionObject3D:
 func _force_teleport_behavior():
 	if _force_teleport_allowed:
 		_force_teleport = true
-		_pending_obstruction_check = true
+		if not collision_check_every_frame:
+			_pending_obstruction_check = true
 
 ## Returns true if hand tracking API is used
 func get_is_hand_tracking() -> bool:
@@ -635,17 +642,24 @@ func _physics_process(delta):
 	var parent : Node3D = get_parent()
 	if parent:
 		parent_transform = parent.global_transform
-		var delta_angle := _was_parent_basis.get_rotation_quaternion().angle_to(parent_transform.basis.get_rotation_quaternion())
-		_rotation_since_obstruction_check += abs(delta_angle)
-		if obstruction_check_enabled and _rotation_since_obstruction_check >= obstruction_rotation_threshold:
-			_rotation_since_obstruction_check = 0.0
-			_pending_obstruction_check = true
+		if not collision_check_every_frame:
+			var delta_angle := _was_parent_basis.get_rotation_quaternion().angle_to(parent_transform.basis.get_rotation_quaternion())
+			_rotation_since_obstruction_check += abs(delta_angle)
+			if obstruction_check_enabled and _rotation_since_obstruction_check >= obstruction_rotation_threshold:
+				_rotation_since_obstruction_check = 0.0
+				_pending_obstruction_check = true
 
 	# Handle DISABLED.
 	if mode == CollisionHandMode.DISABLED:
 		freeze = true
 		_was_parent_basis = parent_transform.basis
 		return
+
+	if not collision_check_every_frame and obstruction_check_enabled and obstruction_poll_interval > 0.0:
+		_obstruction_poll_elapsed += delta
+		if _obstruction_poll_elapsed >= obstruction_poll_interval:
+			_obstruction_poll_elapsed = 0.0
+			_pending_obstruction_check = true
 
 	var target : Transform3D = get_tracked_transform()
 	
@@ -666,7 +680,7 @@ func _physics_process(delta):
 	if mode == CollisionHandMode.TELEPORT:
 		freeze = true
 		global_transform = target
-		if _pending_obstruction_check:
+		if not collision_check_every_frame and _pending_obstruction_check:
 			_run_obstruction_check()
 		_was_parent_basis = parent_transform.basis
 		return
@@ -704,9 +718,13 @@ func _physics_process(delta):
 			parent_angular_velocity = XRT2Helper.rotation_to_axis_angle(_was_parent_basis, parent_transform.basis) / delta
 	# TODO: If physics runs at a higher update rate than we get tracking,
 	# we should adjust our proportional value accordingly
-	
+		
 	# Apply linear motion to hands.
-	XRT2Helper.apply_force_to_target(delta, self, target.origin,
+	var force_target_position : Vector3 = target.origin
+	var desired_delta : Vector3 = force_target_position - global_position
+	if _is_obstructed and desired_delta.dot(_obstruction_normal) < 0.0:
+		force_target_position = global_position + desired_delta.slide(_obstruction_normal)
+	XRT2Helper.apply_force_to_target(delta, self, force_target_position,
 		1.0, parent_linear_velocity, parent_angular_velocity, parent_global_position
 	)
 
@@ -765,7 +783,7 @@ func _process(_delta):
 		freeze = true
 		global_transform = target
 		_force_teleport = false
-		if _pending_obstruction_check:
+		if obstruction_check_enabled and (collision_check_every_frame or _pending_obstruction_check):
 			_run_obstruction_check()
 
 		self.reset_physics_interpolation()
@@ -773,7 +791,7 @@ func _process(_delta):
 
 		return
 
-	if _pending_obstruction_check:
+	if obstruction_check_enabled and (collision_check_every_frame or _pending_obstruction_check):
 		_run_obstruction_check()
 
 	# Our hand should now be positioned so we can do our ghost logic.
@@ -1043,6 +1061,10 @@ func _on_skeleton_updated() -> void:
 	skeleton_updated.emit()
 
 
+var _is_obstructed : bool = false
+var _obstruction_normal : Vector3 = Vector3.ZERO
+var _obstruction_point : Vector3 = Vector3.ZERO
+
 func _run_obstruction_check() -> void:
 	_pending_obstruction_check = false
 	if not obstruction_check_enabled:
@@ -1065,11 +1087,18 @@ func _run_obstruction_check() -> void:
 
 	var hit := _shape_cast_between(from, to)
 	if hit.is_empty():
+		_is_obstructed = false
+		_obstruction_normal = Vector3.ZERO
+		_obstruction_point = Vector3.ZERO
 		return
 
+	_is_obstructed = true;	
 	var normal : Vector3 = hit["normal"]
+	_obstruction_normal = normal.normalized()
+
 	var collision_point : Vector3 = hit["point"]
-	if normal.length() < 0.001:
+	_obstruction_point = collision_point
+	if normal.length() < 0.001:		
 		return
 
 	var marker_to_hand := surface_marker.global_transform.affine_inverse() * global_transform
@@ -1088,6 +1117,32 @@ func _run_obstruction_check() -> void:
 
 	self.reset_physics_interpolation()
 
+func _draw_debug_cast_line(from: Vector3, to: Vector3, duration: float = 2.0) -> void:
+	var mesh := ImmediateMesh.new()
+
+	mesh.surface_begin(Mesh.PRIMITIVE_LINES)
+	mesh.surface_add_vertex(from)
+	mesh.surface_add_vertex(to)
+	mesh.surface_end()
+
+	var mesh_instance := MeshInstance3D.new()
+	mesh_instance.mesh = mesh
+	mesh_instance.name = "DebugShapeCastLine"
+
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	if hand == 0:
+		mat.albedo_color = Color.BLUE
+	else:
+		mat.albedo_color = Color.RED
+	mesh_instance.material_override = mat
+
+	get_tree().current_scene.add_child(mesh_instance)
+
+	await get_tree().create_timer(duration).timeout
+
+	if is_instance_valid(mesh_instance):
+		mesh_instance.queue_free()
 
 func _shape_cast_between(from : Vector3, to : Vector3) -> Dictionary:
 	var cast_shape : SphereShape3D = _obstruction_shape_cast.shape as SphereShape3D
@@ -1097,20 +1152,44 @@ func _shape_cast_between(from : Vector3, to : Vector3) -> Dictionary:
 	_obstruction_shape_cast.collision_mask = collision_mask if obstruction_cast_mask == 0 else obstruction_cast_mask
 	_obstruction_shape_cast.global_position = from
 	_obstruction_shape_cast.target_position = to - from
+	_draw_debug_cast_line(from, to, 2.0)
 	_obstruction_shape_cast.clear_exceptions()
 	_obstruction_shape_cast.add_exception_rid(get_rid())
+
+	if _other_hand:
+		_obstruction_shape_cast.add_exception_rid(_other_hand.get_rid())
+
 	if _parent_body:
 		_obstruction_shape_cast.add_exception_rid(_parent_body.get_rid())
+
 	if _pickup and _pickup._picked_up:
 		_obstruction_shape_cast.add_exception_rid(_pickup._picked_up.get_rid())
 
 	_obstruction_shape_cast.force_shapecast_update()
+
 	if not _obstruction_shape_cast.is_colliding():
 		return {}
 
 	var collision_count := _obstruction_shape_cast.get_collision_count()
+
+	print("---------------- ShapeCast hit count: ", collision_count)
+
+	for i in collision_count:
+		var collider := _obstruction_shape_cast.get_collider(i)
+		var point := _obstruction_shape_cast.get_collision_point(i)
+		var normal := _obstruction_shape_cast.get_collision_normal(i)
+
+		print("Hit[", i, "]")
+		print("  collider: ", collider)
+		print("  collider name: ", collider.name if collider else "<null>")
+		print("  collider path: ", collider.get_path() if collider else "<null>")
+		print("  point: ", point)
+		print("  normal: ", normal)
+		print("  distance from eye: ", from.distance_to(point))
+
 	var from_dist := INF
 	var selected := {}
+
 	for i in collision_count:
 		var collider := _obstruction_shape_cast.get_collider(i)
 		if not collider:
