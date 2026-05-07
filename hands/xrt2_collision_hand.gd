@@ -184,12 +184,21 @@ const ORIENT_DISPLACEMENT := 0.05
 @export var obstruction_held_object_offset : float = 0.06
 @export_range(1, 8, 1) var obstruction_max_results : int = 4
 @export_flags_3d_physics var obstruction_cast_mask : int = 0
+## Fallback start of the shape cast when [member obstruction_marker_from] is empty (usually head camera).
 @export var obstruction_eye_node : NodePath
-@export var obstruction_surface_marker : NodePath
+## NodePath to [code]ObstructionMarkerFrom[/code] (elbow). Prefer a [code]BoneAttachment3D[/code] on the forearm bone (e.g. [code]LeftLowerArm[/code]) under the body [code]Skeleton3D[/code] so the point tracks the real elbow pivot; do not parent under this physics hand. Only [member Node3D.global_position] is used.
+@export var obstruction_marker_from : NodePath
+## NodePath to [code]ObstructionMarkerTo[/code] (palm / cast end); usually parented under this hand.
+@export var obstruction_marker_to : NodePath
 ## Seconds between scheduled obstruction checks as a fallback. [code]0[/code] disables periodic polling.
 @export_range(0.0, 10.0, 0.01, "or_greater", "suffix:s") var obstruction_poll_interval : float = 0.25
 ## Run [method _run_obstruction_check] every [method Node._process] tick (for profiling). When [code]true[/code], rotation, teleport-pending, and timer polling do not schedule extra checks.
 @export var collision_check_every_frame : bool = false
+## When obstructed in [code]COLLIDE[/code] mode, freeze the hand and snap each physics tick so spring forces do not fight the surface correction.
+@export var obstruction_freeze_hand : bool = true
+@export var obstruction_debug_draw : bool = false
+## Move the cast start from the elbow toward the palm (m) so a shape cast that begins inside a wall still finds the first exit toward the hand. [code]0[/code] disables.
+@export_range(0.0, 0.5, 0.01, "or_greater", "suffix:m") var obstruction_cast_start_nudge : float = 0.08
 @export var _other_hand : CollisionObject3D;
 
 ## Properties related to physical appearance
@@ -686,19 +695,34 @@ func _physics_process(delta):
 		return
 
 
-	# We got this far, make sure we're unfrozen and let Godot position our hand.
+	# Obstruction resolution must run in _physics_process (same step as forces), not _process,
+	# or the rigid body springs and contact impulses fight the snap and cause jitter.
+	if mode == CollisionHandMode.COLLIDE and obstruction_check_enabled and (collision_check_every_frame or _pending_obstruction_check):
+		_run_obstruction_check()
+
+	# We got this far, make sure we're unfrozen and let Godot position our hand — except while
+	# snapped to an obstruction, where we stay frozen so the hand stays kinematic on the surface.
 	if freeze:
-		
-		if _pickup and _pickup._picked_up is RigidBody3D:
-			# UnFreeze body
-			var rigid_body: RigidBody3D = _pickup._picked_up as RigidBody3D
-			rigid_body.freeze = false
-			rigid_body.linear_velocity = Vector3()
-			rigid_body.angular_velocity = Vector3()
-		
-		freeze = false
+		var keep_frozen_for_obstruction := obstruction_freeze_hand and mode == CollisionHandMode.COLLIDE and _is_obstructed
+		if not keep_frozen_for_obstruction:
+			if _pickup and _pickup._picked_up is RigidBody3D:
+				# UnFreeze body
+				var rigid_body: RigidBody3D = _pickup._picked_up as RigidBody3D
+				rigid_body.freeze = false
+				rigid_body.linear_velocity = Vector3()
+				rigid_body.angular_velocity = Vector3()
+
+			freeze = false
+			linear_velocity = Vector3()
+			angular_velocity = Vector3()
+
+	if obstruction_freeze_hand and mode == CollisionHandMode.COLLIDE and _is_obstructed:
+		freeze = true
 		linear_velocity = Vector3()
 		angular_velocity = Vector3()
+		_was_parent_basis = parent_transform.basis
+		_last_tracked_transform = target
+		return
 
 	# Get information about our parent body velocities
 	var parent_linear_velocity : Vector3 = Vector3()
@@ -721,9 +745,10 @@ func _physics_process(delta):
 		
 	# Apply linear motion to hands.
 	var force_target_position : Vector3 = target.origin
-	var desired_delta : Vector3 = force_target_position - global_position
-	if _is_obstructed and desired_delta.dot(_obstruction_normal) < 0.0:
-		force_target_position = global_position + desired_delta.slide(_obstruction_normal)
+	if not obstruction_freeze_hand and _is_obstructed:
+		var desired_delta : Vector3 = force_target_position - global_position
+		if desired_delta.dot(_obstruction_normal) < 0.0:
+			force_target_position = global_position + desired_delta.slide(_obstruction_normal)
 	XRT2Helper.apply_force_to_target(delta, self, force_target_position,
 		1.0, parent_linear_velocity, parent_angular_velocity, parent_global_position
 	)
@@ -791,8 +816,7 @@ func _process(_delta):
 
 		return
 
-	if obstruction_check_enabled and (collision_check_every_frame or _pending_obstruction_check):
-		_run_obstruction_check()
+	# Obstruction check runs in _physics_process for COLLIDE mode (see above).
 
 	# Our hand should now be positioned so we can do our ghost logic.
 	if _ghost_mesh:
@@ -1064,6 +1088,8 @@ func _on_skeleton_updated() -> void:
 var _is_obstructed : bool = false
 var _obstruction_normal : Vector3 = Vector3.ZERO
 var _obstruction_point : Vector3 = Vector3.ZERO
+## Previous in-wall tangent axis (X column of surface basis); keeps sliding from flipping 180° when palm wiggles.
+var _obstruction_tangent_reference : Vector3 = Vector3.ZERO
 
 func _run_obstruction_check() -> void:
 	_pending_obstruction_check = false
@@ -1072,38 +1098,70 @@ func _run_obstruction_check() -> void:
 	if not _obstruction_shape_cast:
 		return
 
-	var eye_node := _get_eye_node()
-	if not eye_node:
+	var from_node := _get_obstruction_marker_from_node()
+	if not from_node:
 		return
 
-	var surface_marker := _get_surface_marker()
-	if not surface_marker:
+	var marker_to := _get_obstruction_marker_to_node()
+	if not marker_to:
 		return
 
-	var from := eye_node.global_position
-	var to := surface_marker.global_position
-	if from.distance_to(to) < 0.001:
+	var from_raw := from_node.global_position
+	var to := marker_to.global_position
+	var seg := to - from_raw
+	var seg_len := seg.length()
+	if seg_len < 0.001:
 		return
 
-	var hit := _shape_cast_between(from, to)
+	var nudge: float = maxf(0.0, obstruction_cast_start_nudge)
+	var from_cast := from_raw.move_toward(to, minf(nudge, seg_len - 0.0005))
+
+	var hit: Dictionary = _shape_cast_between(from_cast, to)
 	if hit.is_empty():
 		_is_obstructed = false
 		_obstruction_normal = Vector3.ZERO
 		_obstruction_point = Vector3.ZERO
+		_obstruction_tangent_reference = Vector3.ZERO
 		return
 
-	_is_obstructed = true;	
-	var normal : Vector3 = hit["normal"]
-	_obstruction_normal = normal.normalized()
+	_is_obstructed = true
+	var collision_point: Vector3 = hit["point"]
+	var normal: Vector3 = hit["normal"].normalized()
+	if normal.length() < 0.001:
+		_is_obstructed = false
+		_obstruction_normal = Vector3.ZERO
+		_obstruction_point = Vector3.ZERO
+		_obstruction_tangent_reference = Vector3.ZERO
+		return
 
-	var collision_point : Vector3 = hit["point"]
+	# Single consistent rule: normal should face the cast start (elbow side), i.e. into open space along the forearm.
+	var toward_start := from_cast - collision_point
+	if toward_start.length() > 0.001:
+		if normal.dot(toward_start) < 0.0:
+			normal = -normal
+
+	if _obstruction_normal.length() > 0.001 and normal.dot(_obstruction_normal) < 0.5:
+		_obstruction_tangent_reference = Vector3.ZERO
+
+	_obstruction_normal = normal
 	_obstruction_point = collision_point
-	if normal.length() < 0.001:		
-		return
 
-	var marker_to_hand := surface_marker.global_transform.affine_inverse() * global_transform
-	var corrected_marker := Transform3D(_build_surface_basis(normal, surface_marker), collision_point + normal * obstruction_surface_offset)
+	var target_tr := get_tracked_transform()
+	if target_tr == Transform3D():
+		target_tr = _last_tracked_transform
+	if _target_override:
+		target_tr = _target_override.global_transform * _target_offset
+
+	var marker_to_hand := marker_to.global_transform.affine_inverse() * global_transform
+	var corrected_marker := Transform3D(_build_surface_basis(normal, marker_to, target_tr.basis), collision_point + normal * obstruction_surface_offset)
 	var corrected_hand := corrected_marker * marker_to_hand
+
+	if not corrected_hand.origin.is_finite():
+		_is_obstructed = false
+		_obstruction_normal = Vector3.ZERO
+		_obstruction_point = Vector3.ZERO
+		_obstruction_tangent_reference = Vector3.ZERO
+		return
 
 	if _pickup and _pickup._picked_up is RigidBody3D and _pickup.is_primary():
 		var held_rigid := _pickup._picked_up as RigidBody3D
@@ -1144,15 +1202,17 @@ func _draw_debug_cast_line(from: Vector3, to: Vector3, duration: float = 2.0) ->
 	if is_instance_valid(mesh_instance):
 		mesh_instance.queue_free()
 
-func _shape_cast_between(from : Vector3, to : Vector3) -> Dictionary:
+## Shape cast on segment [code]start → end[/code]. Picks the hit closest to [param start] (first contact along the ray).
+func _shape_cast_between(start : Vector3, end : Vector3) -> Dictionary:
 	var cast_shape : SphereShape3D = _obstruction_shape_cast.shape as SphereShape3D
 	if cast_shape:
 		cast_shape.radius = obstruction_cast_radius
 
 	_obstruction_shape_cast.collision_mask = collision_mask if obstruction_cast_mask == 0 else obstruction_cast_mask
-	_obstruction_shape_cast.global_position = from
-	_obstruction_shape_cast.target_position = to - from
-	_draw_debug_cast_line(from, to, 2.0)
+	_obstruction_shape_cast.global_position = start
+	_obstruction_shape_cast.target_position = end - start
+	if obstruction_debug_draw:
+		_draw_debug_cast_line(start, end, 2.0)
 	_obstruction_shape_cast.clear_exceptions()
 	_obstruction_shape_cast.add_exception_rid(get_rid())
 
@@ -1172,20 +1232,13 @@ func _shape_cast_between(from : Vector3, to : Vector3) -> Dictionary:
 
 	var collision_count := _obstruction_shape_cast.get_collision_count()
 
-	print("---------------- ShapeCast hit count: ", collision_count)
-
-	for i in collision_count:
-		var collider := _obstruction_shape_cast.get_collider(i)
-		var point := _obstruction_shape_cast.get_collision_point(i)
-		var normal := _obstruction_shape_cast.get_collision_normal(i)
-
-		print("Hit[", i, "]")
-		print("  collider: ", collider)
-		print("  collider name: ", collider.name if collider else "<null>")
-		print("  collider path: ", collider.get_path() if collider else "<null>")
-		print("  point: ", point)
-		print("  normal: ", normal)
-		print("  distance from eye: ", from.distance_to(point))
+	if obstruction_debug_draw:
+		print("---------------- ShapeCast hit count: ", collision_count)
+		for i in collision_count:
+			var collider := _obstruction_shape_cast.get_collider(i)
+			var point := _obstruction_shape_cast.get_collision_point(i)
+			var normal := _obstruction_shape_cast.get_collision_normal(i)
+			print("Hit[", i, "] collider: ", collider, " point: ", point, " normal: ", normal)
 
 	var from_dist := INF
 	var selected := {}
@@ -1200,7 +1253,7 @@ func _shape_cast_between(from : Vector3, to : Vector3) -> Dictionary:
 			continue
 
 		var point := _obstruction_shape_cast.get_collision_point(i)
-		var dist := from.distance_to(point)
+		var dist := start.distance_to(point)
 		if dist < from_dist:
 			from_dist = dist
 			selected = {
@@ -1211,18 +1264,40 @@ func _shape_cast_between(from : Vector3, to : Vector3) -> Dictionary:
 	return selected
 
 
-func _build_surface_basis(surface_normal : Vector3, marker_node : Node3D) -> Basis:
+func _build_surface_basis(surface_normal : Vector3, marker_node : Node3D, tracked_basis : Basis) -> Basis:
 	var normal := surface_normal.normalized()
-	var marker_forward := -marker_node.global_basis.z
-	var tangent := marker_forward.slide(normal).normalized()
-	if tangent.length() < 0.001:
-		tangent = marker_node.global_basis.x.slide(normal).normalized()
-	if tangent.length() < 0.001:
-		tangent = Vector3.FORWARD.slide(normal).normalized()
 
-	var right := tangent.cross(normal).normalized()
+	var palm_fwd := -tracked_basis.z
+	var palm_flat := palm_fwd.slide(normal)
+
+	var right: Vector3
+	var sin_from_up := Vector3.UP.cross(normal).length()
+	if sin_from_up > 0.15:
+		# Stable wall tangent from world up; sign fixed only via [member _obstruction_tangent_reference]
+		# (palm-relative sign flips were fighting tracking and mirrored differently per hand).
+		right = Vector3.UP.cross(normal).normalized()
+	else:
+		# Floors/ceilings / shallow slopes: palm in plane, then marker fallbacks.
+		var tangent := palm_flat
+		if tangent.length() < 0.001:
+			tangent = tracked_basis.x.slide(normal)
+		if tangent.length() < 0.001:
+			tangent = (-marker_node.global_basis.z).slide(normal)
+		if tangent.length() < 0.001:
+			tangent = marker_node.global_basis.x.slide(normal)
+		if tangent.length() < 0.001:
+			tangent = Vector3.FORWARD.slide(normal)
+		tangent = tangent.normalized()
+		right = tangent.cross(normal).normalized()
+
+	if _obstruction_tangent_reference.length() > 0.001 and right.length() > 0.001:
+		if right.dot(_obstruction_tangent_reference) < 0.0:
+			right = -right
+
 	var forward := normal.cross(right).normalized()
-	return Basis(right, normal, -forward).orthonormalized()
+	var out := Basis(right, normal, -forward).orthonormalized()
+	_obstruction_tangent_reference = out.x
+	return out
 
 
 func _get_eye_node() -> Node3D:
@@ -1242,9 +1317,17 @@ func _get_eye_node() -> Node3D:
 	return null
 
 
-func _get_surface_marker() -> Node3D:
-	if not obstruction_surface_marker.is_empty():
-		var configured := get_node_or_null(obstruction_surface_marker)
+func _get_obstruction_marker_from_node() -> Node3D:
+	if not obstruction_marker_from.is_empty():
+		var configured := get_node_or_null(obstruction_marker_from)
+		if configured is Node3D:
+			return configured
+	return _get_eye_node()
+
+
+func _get_obstruction_marker_to_node() -> Node3D:
+	if not obstruction_marker_to.is_empty():
+		var configured := get_node_or_null(obstruction_marker_to)
 		if configured is Node3D:
 			return configured
 
