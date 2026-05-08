@@ -175,18 +175,6 @@ const ORIENT_DISPLACEMENT := 0.05
 ## Drop held object if teleport distance is reached?
 @export var drop_distance : float = 3.0
 
-## Event-driven obstruction checks (no per-frame cast)
-@export_group("Obstruction Check")
-@export var obstruction_check_enabled : bool = true
-@export_range(0.0, 180.0, 1.0, "radians_as_degrees") var obstruction_rotation_threshold : float = deg_to_rad(30.0)
-@export var obstruction_cast_radius : float = 0.06
-@export var obstruction_surface_offset : float = 0.02
-@export var obstruction_held_object_offset : float = 0.06
-@export_range(1, 8, 1) var obstruction_max_results : int = 4
-@export_flags_3d_physics var obstruction_cast_mask : int = 0
-@export var obstruction_eye_node : NodePath
-@export var obstruction_surface_marker : NodePath
-
 ## Properties related to physical appearance
 @export_group("Appearance")
 
@@ -287,9 +275,9 @@ var _hand_modifier: XRT2HandModifier3D
 
 # Finger pose modifier
 var _finger_pose_modifier: XRT2FingerPosesModifier3D
-var _obstruction_shape_cast: ShapeCast3D
-var _rotation_since_obstruction_check: float = 0.0
-var _pending_obstruction_check: bool = false
+
+# Safe Transform
+
 #endregion
 
 
@@ -324,7 +312,6 @@ func get_collision_parent() -> CollisionObject3D:
 func _force_teleport_behavior():
 	if _force_teleport_allowed:
 		_force_teleport = true
-		_pending_obstruction_check = true
 
 ## Returns true if hand tracking API is used
 func get_is_hand_tracking() -> bool:
@@ -498,6 +485,28 @@ func get_bone_transform(bone_name : String) -> Transform3D:
 
 
 #region Private Property Update Functions
+func get_palm_diameter() -> float:
+	if not _palm_collision_shape or not _palm_collision_shape.shape:
+		return 0.05
+
+	var scale := _palm_collision_shape.global_transform.basis.get_scale()
+	var max_scale := max(scale.x, max(scale.y, scale.z))
+
+	var shape := _palm_collision_shape.shape
+
+	if shape is SphereShape3D:
+		return shape.radius * 2.0 * max_scale
+
+	if shape is CapsuleShape3D:
+		return shape.radius * 2.0 * max_scale
+
+	if shape is BoxShape3D:
+		var s: Vector3 = shape.size * max_scale
+		return min(s.x, min(s.y, s.z))
+
+	return 0.05
+
+
 # Check if we need different trackers
 func _update_trackers():
 	var new_hand_tracker : XRHandTracker = \
@@ -614,17 +623,6 @@ func _ready():
 	# Update the target
 	_update_target()
 
-	# Event-driven shape cast helper for line-of-sight hand checks.
-	_obstruction_shape_cast = ShapeCast3D.new()
-	_obstruction_shape_cast.enabled = false
-	_obstruction_shape_cast.collide_with_areas = false
-	_obstruction_shape_cast.collide_with_bodies = true
-	_obstruction_shape_cast.max_results = obstruction_max_results
-	var sphere_shape := SphereShape3D.new()
-	sphere_shape.radius = obstruction_cast_radius
-	_obstruction_shape_cast.shape = sphere_shape
-	add_child(_obstruction_shape_cast, false, Node.INTERNAL_MODE_BACK)
-
 
 # Handle physics processing
 func _physics_process(delta):
@@ -634,12 +632,7 @@ func _physics_process(delta):
 	var parent_transform : Transform3D = Transform3D()
 	var parent : Node3D = get_parent()
 	if parent:
-		parent_transform = parent.global_transform
-		var delta_angle := _was_parent_basis.get_rotation_quaternion().angle_to(parent_transform.basis.get_rotation_quaternion())
-		_rotation_since_obstruction_check += abs(delta_angle)
-		if obstruction_check_enabled and _rotation_since_obstruction_check >= obstruction_rotation_threshold:
-			_rotation_since_obstruction_check = 0.0
-			_pending_obstruction_check = true
+		parent_transform = parent.global_transform 
 
 	# Handle DISABLED.
 	if mode == CollisionHandMode.DISABLED:
@@ -656,21 +649,17 @@ func _physics_process(delta):
 	# Check target override
 	if _target_override:
 		target = _target_override.global_transform * _target_offset
-		
+
 	# Always place our ghost mesh at our tracked location.
 	if _ghost_mesh:
 		_ghost_mesh.global_transform = target
-
 
 	# Handle TELEPORT
 	if mode == CollisionHandMode.TELEPORT:
 		freeze = true
 		global_transform = target
-		if _pending_obstruction_check:
-			_run_obstruction_check()
 		_was_parent_basis = parent_transform.basis
 		return
-
 
 	# We got this far, make sure we're unfrozen and let Godot position our hand.
 	if freeze:
@@ -705,33 +694,6 @@ func _physics_process(delta):
 	# TODO: If physics runs at a higher update rate than we get tracking,
 	# we should adjust our proportional value accordingly
 	
-	# Apply linear motion to hands.
-	XRT2Helper.apply_force_to_target(delta, self, target.origin,
-		1.0, parent_linear_velocity, parent_angular_velocity, parent_global_position
-	)
-
-	# Apply angular motion to hands.
-	XRT2Helper.apply_torque_to_target(
-		delta, self, target.basis, 1.0, parent_angular_velocity, parent_global_basis
-	)
-
-	# Remember this in case we need it
-	_was_parent_basis = parent_transform.basis
-	_last_tracked_transform = target
-
-
-func _process(_delta):
-	if Engine.is_editor_hint():
-		return
-	
-	var target : Transform3D = get_tracked_transform()
-	
-	if target == Transform3D():
-		target = _last_tracked_transform
-	
-	if _target_override:
-		target = _target_override.global_transform * _target_offset
-		
 	# Handle dropping if too far from target, and grab point visual movement
 	if _pickup and _pickup._picked_up:
 		var grab_point = _pickup.get_picked_up_grab_point()
@@ -747,34 +709,45 @@ func _process(_delta):
 			
 		# Drop if too far		
 		if distance > drop_distance:
-			_pickup.drop_held_object()
+			if _pickup and _pickup.picked_up:
+				_pickup.drop_held_object()
 				
 	# Handle hand too far from target tracking target.
 	if global_position.distance_to(target.origin) > teleport_distance or _force_teleport:
-		if _pickup and _pickup._picked_up is RigidBody3D: # Only if were holding a rigidbody
-			if _pickup.is_primary(): # Only if its a primary pickup, we dont want to double it for 2 handed holding
+
+		var safe_target := get_safe_sweep_target(target) if _force_teleport else target
+
+		if _pickup and _pickup._picked_up is RigidBody3D:
+			if _pickup.is_primary():
 				var rigid_body: RigidBody3D = _pickup._picked_up as RigidBody3D
-				#rigid_body.freeze = true
-				
-				# Handle teleporting the object in the hand to its offset position
-				var offset = global_transform.affine_inverse() * rigid_body.global_transform;
-				rigid_body.global_transform = target * offset
-				
+
+				# Preserve held object's offset from the hand.
+				var offset := global_transform.affine_inverse() * rigid_body.global_transform
+				rigid_body.global_transform = safe_target * offset
 				rigid_body.reset_physics_interpolation()
-				
+
 		freeze = true
-		global_transform = target
+		global_transform = safe_target
 		_force_teleport = false
-		if _pending_obstruction_check:
-			_run_obstruction_check()
 
-		self.reset_physics_interpolation()
+		reset_physics_interpolation()
 
+		if _parent_body:
+			_parent_body.reset_physics_interpolation()
 
-		return
+	# Apply linear motion to hands.
+	XRT2Helper.apply_force_to_target(delta, self, target.origin,
+		1.0, parent_linear_velocity, parent_angular_velocity, parent_global_position
+	)
 
-	if _pending_obstruction_check:
-		_run_obstruction_check()
+	# Apply angular motion to hands.
+	XRT2Helper.apply_torque_to_target(
+		delta, self, target.basis, 1.0, parent_angular_velocity, parent_global_basis
+	)
+
+	# Remember this in case we need it
+	_was_parent_basis = parent_transform.basis
+	_last_tracked_transform = target
 
 	# Our hand should now be positioned so we can do our ghost logic.
 	if _ghost_mesh:
@@ -793,7 +766,6 @@ func _process(_delta):
 		_ghost_mesh.scale = Vector3(world_scale, world_scale, world_scale)
 	if _hand_mesh.visible:
 		_hand_mesh.scale = Vector3(world_scale, world_scale, world_scale)
-#endregion
 
 
 #region Private Target Override Functions
@@ -858,6 +830,50 @@ func _update_target() -> void:
 		if mode != CollisionHandMode.DISABLED:
 			# Reposition to our target override
 			global_transform = _target_override.global_transform * _target_offset
+			
+func get_safe_sweep_target(target: Transform3D) -> Transform3D:
+	var start := global_transform
+	var distance := start.origin.distance_to(target.origin)
+
+	if distance <= 0.001:
+		return target
+
+	var diameter := max(get_palm_diameter(), 0.01)
+
+	# Use half diameter so thin geometry is harder to skip.
+	var step_size = diameter * 0.5
+	var steps := max(1, int(ceil(distance / step_size)))
+
+	var previous_safe := start
+	var current := start
+
+	for i in range(1, steps + 1):
+		var t := float(i) / float(steps)
+
+		var next := start.interpolate_with(target, t)
+		var motion := next.origin - current.origin
+
+		var params := PhysicsTestMotionParameters3D.new()
+		params.from = current
+		params.motion = motion
+		params.margin = 0.01
+		params.recovery_as_collision = true
+
+		var result := PhysicsTestMotionResult3D.new()
+
+		var hit := PhysicsServer3D.body_test_motion(
+			get_rid(),
+			params,
+			result
+		)
+
+		if hit:
+			return previous_safe
+
+		previous_safe = next
+		current = next
+
+	return target
 #endregion
 
 
@@ -1041,135 +1057,6 @@ func _on_skeleton_updated() -> void:
 		_hand_skeleton.set_bone_pose(i, bone_pose)
 
 	skeleton_updated.emit()
-
-
-func _run_obstruction_check() -> void:
-	_pending_obstruction_check = false
-	if not obstruction_check_enabled:
-		return
-	if not _obstruction_shape_cast:
-		return
-
-	var eye_node := _get_eye_node()
-	if not eye_node:
-		return
-
-	var surface_marker := _get_surface_marker()
-	if not surface_marker:
-		return
-
-	var from := eye_node.global_position
-	var to := surface_marker.global_position
-	if from.distance_to(to) < 0.001:
-		return
-
-	var hit := _shape_cast_between(from, to)
-	if hit.is_empty():
-		return
-
-	var normal : Vector3 = hit["normal"]
-	var collision_point : Vector3 = hit["point"]
-	if normal.length() < 0.001:
-		return
-
-	var marker_to_hand := surface_marker.global_transform.affine_inverse() * global_transform
-	var corrected_marker := Transform3D(_build_surface_basis(normal, surface_marker), collision_point + normal * obstruction_surface_offset)
-	var corrected_hand := corrected_marker * marker_to_hand
-
-	if _pickup and _pickup._picked_up is RigidBody3D and _pickup.is_primary():
-		var held_rigid := _pickup._picked_up as RigidBody3D
-		var hand_to_held := global_transform.affine_inverse() * held_rigid.global_transform
-		corrected_hand.origin += normal * obstruction_held_object_offset
-		global_transform = corrected_hand
-		held_rigid.global_transform = global_transform * hand_to_held
-		held_rigid.reset_physics_interpolation()
-	else:
-		global_transform = corrected_hand
-
-	self.reset_physics_interpolation()
-
-
-func _shape_cast_between(from : Vector3, to : Vector3) -> Dictionary:
-	var cast_shape : SphereShape3D = _obstruction_shape_cast.shape as SphereShape3D
-	if cast_shape:
-		cast_shape.radius = obstruction_cast_radius
-
-	_obstruction_shape_cast.collision_mask = collision_mask if obstruction_cast_mask == 0 else obstruction_cast_mask
-	_obstruction_shape_cast.global_position = from
-	_obstruction_shape_cast.target_position = to - from
-	_obstruction_shape_cast.clear_exceptions()
-	_obstruction_shape_cast.add_exception_rid(get_rid())
-	if _parent_body:
-		_obstruction_shape_cast.add_exception_rid(_parent_body.get_rid())
-	if _pickup and _pickup._picked_up:
-		_obstruction_shape_cast.add_exception_rid(_pickup._picked_up.get_rid())
-
-	_obstruction_shape_cast.force_shapecast_update()
-	if not _obstruction_shape_cast.is_colliding():
-		return {}
-
-	var collision_count := _obstruction_shape_cast.get_collision_count()
-	var from_dist := INF
-	var selected := {}
-	for i in collision_count:
-		var collider := _obstruction_shape_cast.get_collider(i)
-		if not collider:
-			continue
-		if collider == self:
-			continue
-		if _pickup and _pickup._picked_up and collider == _pickup._picked_up:
-			continue
-
-		var point := _obstruction_shape_cast.get_collision_point(i)
-		var dist := from.distance_to(point)
-		if dist < from_dist:
-			from_dist = dist
-			selected = {
-				"point": point,
-				"normal": _obstruction_shape_cast.get_collision_normal(i)
-			}
-
-	return selected
-
-
-func _build_surface_basis(surface_normal : Vector3, marker_node : Node3D) -> Basis:
-	var normal := surface_normal.normalized()
-	var marker_forward := -marker_node.global_basis.z
-	var tangent := marker_forward.slide(normal).normalized()
-	if tangent.length() < 0.001:
-		tangent = marker_node.global_basis.x.slide(normal).normalized()
-	if tangent.length() < 0.001:
-		tangent = Vector3.FORWARD.slide(normal).normalized()
-
-	var right := tangent.cross(normal).normalized()
-	var forward := normal.cross(right).normalized()
-	return Basis(right, normal, -forward).orthonormalized()
-
-
-func _get_eye_node() -> Node3D:
-	if not obstruction_eye_node.is_empty():
-		var configured := get_node_or_null(obstruction_eye_node)
-		if configured is Node3D:
-			return configured
-
-	var root := get_parent()
-	if root:
-		root = root.get_parent()
-	if root:
-		for child in root.get_children():
-			if child is XRCamera3D:
-				return child
-
-	return null
-
-
-func _get_surface_marker() -> Node3D:
-	if not obstruction_surface_marker.is_empty():
-		var configured := get_node_or_null(obstruction_surface_marker)
-		if configured is Node3D:
-			return configured
-
-	return self
 
 
 # TODO: Hook this up, this is now part of our locomotion system.
