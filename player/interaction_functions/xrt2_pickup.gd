@@ -375,8 +375,6 @@ func drop_held_object() -> void:
 			_picked_up.linear_velocity = linear_velocity
 			_picked_up.angular_velocity = angular_velocity
 	
-	was_picked_up.add_to_group("dropped")
-	
 	# And we're no longer holding something
 	_picked_up = null
 	_grab_point = null
@@ -391,6 +389,10 @@ func drop_held_object() -> void:
 	elif _xr_player_object:
 		was_picked_up.remove_collision_exception_with(_xr_player_object)
 		_xr_player_object.remove_collision_exception_with(was_picked_up)
+		
+	# Add to dropped group if it is dropped by the primary ONLY
+	if not other:
+		was_picked_up.add_to_group("dropped")
 	
 	grab_toggle = false
 	_is_grab = false
