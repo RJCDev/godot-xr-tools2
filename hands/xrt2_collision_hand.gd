@@ -704,8 +704,13 @@ func _physics_process(delta):
 
 			# Move hand visually to grab point if tween is finished
 			if not _pickup._tween.is_valid():
-				var offset = _pickup.get_parent().global_transform.inverse() * global_transform
-				_hand_mesh.global_transform = grab_point.global_transform * offset
+				var attachment_xf : Transform3D = _pickup.get_parent().global_transform
+				attachment_xf.basis = attachment_xf.basis.orthonormalized()
+				var offset : Transform3D = attachment_xf.affine_inverse() * global_transform
+				offset.basis = offset.basis.orthonormalized()
+				var grab_xf : Transform3D = grab_point.global_transform
+				grab_xf.basis = grab_xf.basis.orthonormalized()
+				_hand_mesh.global_transform = grab_xf * offset
 			
 		# Drop if too far		
 		if distance > drop_distance:

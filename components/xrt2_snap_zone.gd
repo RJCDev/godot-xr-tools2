@@ -224,7 +224,11 @@ func pick_up_object(target: PhysicsBody3D) -> void:
 			player.play()
 			
 	if snap_in_place:
-		picked_up_object.global_transform = global_transform
+		# Copy pose without inheriting any non-uniform/scaled basis.
+		var snap_xf := global_transform
+		snap_xf.basis = snap_xf.basis.orthonormalized()
+		picked_up_object.global_transform = snap_xf
+		picked_up_object.scale = Vector3.ONE
 		
 	_joint = Generic6DOFJoint3D.new()
 	add_child(_joint, false, Node.INTERNAL_MODE_BACK)

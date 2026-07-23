@@ -115,6 +115,11 @@ var _is_grab : bool = false
 # Remember if our XR action was pressed last frame
 var _was_xr_pressed : bool = false
 
+# After dropping, ignore grab until the button is fully released so we don't
+# immediately re-pick the same object while grip is still held (e.g. Droppable
+# items dropped via grip_click from HandComponent).
+var _block_grab_until_release : bool = false
+
 # What is currently our closest object
 var _closest_object : ClosestObject
 
@@ -213,10 +218,17 @@ func pickup_object(which : PhysicsBody3D):
 			else: # Just  dont pick it up
 				return
 			
-			var offset = get_parent().global_transform.inverse() * hand_transform
+			# Orthonormalize + affine_inverse so any scaled grab/attachment
+			# basis cannot bake non-1 scale into the physics hand.
+			dest_transform.basis = dest_transform.basis.orthonormalized()
+			var attachment_xf : Transform3D = get_parent().global_transform
+			attachment_xf.basis = attachment_xf.basis.orthonormalized()
+			var offset : Transform3D = attachment_xf.affine_inverse() * hand_transform
+			offset.basis = offset.basis.orthonormalized()
 
 			# Now move our hand in the correct grab position
 			_xr_collision_hand.global_transform = dest_transform * offset
+			_xr_collision_hand.scale = Vector3.ONE
 			_xr_collision_hand.force_update_transform()
 
 			# Now join our hand and the object we're picking up together
@@ -360,9 +372,12 @@ func drop_held_object() -> void:
 			if _tween:
 				_tween.kill()
 
+			# Physics forces only correct position/rotation — reset scale
+			# so a previous grab cannot leave the hand permanently larger.
+			_xr_collision_hand.scale = Vector3.ONE
 			if _xr_collision_hand._hand_mesh:
-				_xr_collision_hand._hand_mesh.transform = Transform3D()	
-				
+				_xr_collision_hand._hand_mesh.transform = Transform3D()
+
 			_xr_collision_hand._force_teleport_allowed = true
 
 	elif _xr_controller:
@@ -396,6 +411,7 @@ func drop_held_object() -> void:
 	
 	grab_toggle = false
 	_is_grab = false
+	_block_grab_until_release = true
 	
 	dropped.emit(self, was_picked_up, other == null)
 	
@@ -555,7 +571,16 @@ func _process(_delta):
 	var xr_grab_float : float = _get_grab_value()
 	var threshold : float = 0.6 if _was_xr_pressed else 0.8
 	var xr_pressed : bool = xr_grab_float > threshold
-	if xr_pressed != _was_xr_pressed:
+
+	# Don't allow a new grab until the release that followed a drop finishes.
+	if _block_grab_until_release:
+		if xr_pressed:
+			_was_xr_pressed = true
+			_is_grab = false
+		else:
+			_block_grab_until_release = false
+			_was_xr_pressed = false
+	elif xr_pressed != _was_xr_pressed:
 		_was_xr_pressed = xr_pressed
 		if grab_toggle:
 			if _was_xr_pressed:
@@ -575,7 +600,7 @@ func _process(_delta):
 		if not _grab_point.useable:
 			drop_held_object()
 			
-	elif not was_grab and _is_grab and _closest_object and is_instance_valid(_closest_object.body):
+	elif not _block_grab_until_release and not was_grab and _is_grab and _closest_object and is_instance_valid(_closest_object.body):
 		try_pickup.emit(self, _closest_object.body)
 		return
 
