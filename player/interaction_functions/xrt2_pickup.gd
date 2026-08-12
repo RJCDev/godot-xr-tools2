@@ -75,8 +75,11 @@ static var _highlighted_bodies : Dictionary[Node3D, HighlightedBody]
 		if is_inside_tree():
 			_update_detection_radius()
 
-## The action we check when grabbing things
+## Primary grab/drop action (grip). Also used for sticky drop.
 @export var grab_action : String = "grab"
+
+## Alternate action that can initiate a pickup (trigger).
+@export var pick_action : String = "trigger_click"
 
 ## If false we need to continously hold our grab button, if true we toggle
 ## Note: with keyboard entry toggle is enforced
@@ -112,8 +115,12 @@ var _tween : Tween
 # Tracks if our input is currently in grab mode (even if we're not holding anything)
 var _is_grab : bool = false
 
-# Remember if our XR action was pressed last frame
-var _was_xr_pressed : bool = false
+# Remember if our XR actions were pressed last frame
+var _was_drop_pressed : bool = false
+var _was_pick_pressed : bool = false
+
+# Which input initiated the current grab ("grip_click", "trigger_click", etc.)
+var _pick_input : String = ""
 
 # After dropping, ignore grab until the button is fully released so we don't
 # immediately re-pick the same object while grip is still held (e.g. Droppable
@@ -187,6 +194,17 @@ func get_picked_up_grab_point() -> XRT2GrabPoint:
 	if is_instance_valid(_grab_point):
 		return _grab_point
 	return null
+
+
+## Returns which input action initiated the current grab.
+func get_pick_input() -> String:
+	return _pick_input
+
+
+## Reset grab intent when a pickup attempt is rejected by game logic.
+func cancel_pickup_attempt() -> void:
+	_is_grab = false
+	_pick_input = ""
 
 
 ## Returns true if we're the primary hand holding this object
@@ -411,6 +429,7 @@ func drop_held_object() -> void:
 	
 	grab_toggle = false
 	_is_grab = false
+	_pick_input = ""
 	_block_grab_until_release = true
 	
 	dropped.emit(self, was_picked_up, other == null)
@@ -566,43 +585,72 @@ func _process(_delta):
 	if not enabled:
 		return
 
-	# Check our grab status
+	# Check grab/drop input — pickup accepts trigger OR grip; sticky drop is grip-only.
 	var was_grab = _is_grab
-	var xr_grab_float : float = _get_grab_value()
-	var threshold : float = 0.6 if _was_xr_pressed else 0.8
-	var xr_pressed : bool = xr_grab_float > threshold
+	var grip_now := _is_action_pressed(grab_action, _was_drop_pressed)
+	var pick_now := _is_action_pressed(pick_action, _was_pick_pressed)
 
-	# Don't allow a new grab until the release that followed a drop finishes.
+	# Don't allow a new grab until both actions release after a drop.
 	if _block_grab_until_release:
-		if xr_pressed:
-			_was_xr_pressed = true
+		if grip_now or pick_now:
+			_was_drop_pressed = grip_now
+			_was_pick_pressed = pick_now
 			_is_grab = false
 		else:
 			_block_grab_until_release = false
-			_was_xr_pressed = false
-	elif xr_pressed != _was_xr_pressed:
-		_was_xr_pressed = xr_pressed
-		if grab_toggle:
-			if _was_xr_pressed:
-				_is_grab = not _is_grab
+			_was_drop_pressed = false
+			_was_pick_pressed = false
+	elif _picked_up:
+		if _grab_point and _grab_point.useable:
+			# Useable items stay held; holster/Droppable handles intentional drop.
+			_was_drop_pressed = grip_now
+			_was_pick_pressed = pick_now
+		elif grab_toggle:
+			# Sticky: only grip toggles/releases can drop; trigger release is ignored.
+			if grip_now != _was_drop_pressed:
+				_was_drop_pressed = grip_now
+				if grip_now:
+					_is_grab = not _is_grab
+			if pick_now != _was_pick_pressed:
+				_was_pick_pressed = pick_now
+			if not _is_grab:
+				drop_held_object()
 		else:
-			_is_grab = xr_pressed
-	elif InputMap.has_action(grab_action) and Input.is_action_just_pressed(grab_action):
-		# Toggle
-		_is_grab = not _is_grab
+			# Hold mode (door knobs): drop when the button that started the grab releases.
+			if _pick_input == grab_action and not grip_now:
+				drop_held_object()
+			elif _pick_input == pick_action and not pick_now:
+				drop_held_object()
+			_was_drop_pressed = grip_now
+			_was_pick_pressed = pick_now
+	else:
+		if grip_now != _was_drop_pressed:
+			_was_drop_pressed = grip_now
+			if grab_toggle:
+				if grip_now:
+					_is_grab = not _is_grab
+					if _is_grab:
+						_pick_input = grab_action
+			else:
+				_is_grab = grip_now
+				if grip_now:
+					_pick_input = grab_action
 
-	if _picked_up:
-		if _is_grab:
+		if pick_now != _was_pick_pressed:
+			_was_pick_pressed = pick_now
+			if pick_now:
+				_is_grab = true
+				_pick_input = pick_action
+
+		if InputMap.has_action(grab_action) and Input.is_action_just_pressed(grab_action):
+			_is_grab = not _is_grab
+			if _is_grab:
+				_pick_input = grab_action
+
+		if not _block_grab_until_release and not was_grab and _is_grab \
+				and _closest_object and is_instance_valid(_closest_object.body):
+			try_pickup.emit(self, _closest_object.body)
 			return
-
-		# Allow dropping if we are not on a useable grabpoint so we can detach from a grabbed usable
-		# This overrides the behavior 
-		if not _grab_point.useable:
-			drop_held_object()
-			
-	elif not _block_grab_until_release and not was_grab and _is_grab and _closest_object and is_instance_valid(_closest_object.body):
-		try_pickup.emit(self, _closest_object.body)
-		return
 
 	# Update closest object
 	var was_closest_object : ClosestObject = _closest_object
@@ -881,14 +929,18 @@ func _get_pose() -> XRPose:
 
 
 # Returns our grab input
-func _get_grab_value() -> float:
+func _get_action_value(action : String) -> float:
 	if _xr_collision_hand:
-		var input : Variant = _xr_collision_hand.get_input(grab_action)
+		var input : Variant = _xr_collision_hand.get_input(action)
 		if input:
-			var value : float = input
-			return value
+			return input
 	elif _xr_controller:
-		return _xr_controller.get_float(grab_action)
+		return _xr_controller.get_float(action)
 
 	return 0.0
+
+
+func _is_action_pressed(action : String, was_pressed : bool) -> bool:
+	var threshold : float = 0.6 if was_pressed else 0.8
+	return _get_action_value(action) > threshold
 #endregion
