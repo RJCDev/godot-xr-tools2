@@ -232,6 +232,10 @@ func pickup_object(which : PhysicsBody3D):
 				_xr_collision_hand.open_finger_poses = _grab_point.open_finger_poses
 				_grab_point._occupied = true
 				grab_toggle = _grab_point.toggle
+				# Secondary support grips are always trigger-hold, never sticky.
+				if _is_secondary_support_grab(which, _grab_point):
+					grab_toggle = false
+					_pick_input = pick_action
 					
 			else: # Just  dont pick it up
 				return
@@ -586,9 +590,18 @@ func _process(_delta):
 		return
 
 	# Check grab/drop input — pickup accepts trigger OR grip; sticky drop is grip-only.
+	# Refresh closest before empty-hand input so secondary/primary rules use current target.
+	if not _picked_up:
+		_update_closest_object()
+
 	var was_grab = _is_grab
+	var was_pick_pressed := _was_pick_pressed
 	var grip_now := _is_action_pressed(grab_action, _was_drop_pressed)
 	var pick_now := _is_action_pressed(pick_action, _was_pick_pressed)
+	var pick_pressed_edge := pick_now and not was_pick_pressed
+	var closest_is_secondary := _closest_object \
+			and is_instance_valid(_closest_object.body) \
+			and _is_secondary_support_grab(_closest_object.body, _closest_object.grab_point)
 
 	# Don't allow a new grab until both actions release after a drop.
 	if _block_grab_until_release:
@@ -602,9 +615,15 @@ func _process(_delta):
 			_was_pick_pressed = false
 	elif _picked_up:
 		if _grab_point and _grab_point.useable:
-			# Useable items stay held; holster/Droppable handles intentional drop.
+			# Primary / useable grips stay sticky; holster Droppable handles intentional drop.
 			_was_drop_pressed = grip_now
 			_was_pick_pressed = pick_now
+		elif _is_secondary_support_grab(_picked_up, _grab_point):
+			# Secondary gun grips: trigger-hold only (never sticky, never grip-held).
+			_was_drop_pressed = grip_now
+			_was_pick_pressed = pick_now
+			if not pick_now:
+				drop_held_object()
 		elif grab_toggle:
 			# Sticky: only grip toggles/releases can drop; trigger release is ignored.
 			if grip_now != _was_drop_pressed:
@@ -623,6 +642,19 @@ func _process(_delta):
 				drop_held_object()
 			_was_drop_pressed = grip_now
 			_was_pick_pressed = pick_now
+	elif closest_is_secondary:
+		# Secondary support: trigger edge only. Grip must not latch or block pickup.
+		_was_drop_pressed = grip_now
+		_was_pick_pressed = pick_now
+		if _pick_input == grab_action or (_is_grab and _pick_input != pick_action):
+			_is_grab = false
+			_pick_input = ""
+		if not _block_grab_until_release and pick_pressed_edge \
+				and _closest_object and is_instance_valid(_closest_object.body):
+			_is_grab = true
+			_pick_input = pick_action
+			try_pickup.emit(self, _closest_object.body)
+			return
 	else:
 		if grip_now != _was_drop_pressed:
 			_was_drop_pressed = grip_now
@@ -652,30 +684,34 @@ func _process(_delta):
 			try_pickup.emit(self, _closest_object.body)
 			return
 
-	# Update closest object
+	# Closest is already refreshed when empty-handed; only refresh here while holding
+	# (highlights are suppressed while holding anyway).
+	if _picked_up:
+		return
+
+	# Highlight pass for empty hand (closest already updated above).
+	# No further closest recompute needed this frame.
+#endregion
+
+
+func _update_closest_object() -> void:
 	var was_closest_object : ClosestObject = _closest_object
 	_closest_object = _get_closest()
 
 	if was_closest_object and _closest_object and was_closest_object.body == _closest_object.body:
-		# We're done
 		return
 
 	if was_closest_object and is_instance_valid(was_closest_object.body):
-		# Remove highlight
 		_remove_highlight(was_closest_object.body)
 
 	if _closest_object and is_instance_valid(_closest_object.body):
-		# Add highlight
 		if _closest_object.grab_point and _closest_object.grab_point.highlight_mode == 2:
-			# Highlight is disabled
 			return
 
 		if _closest_object.grab_point and _closest_object.grab_point.highlight_mode == 1 and picked_up_by(_closest_object.body):
-			# Don't highlight for two handed pickup
 			return
-	
+
 		_add_highlight(_closest_object.body)
-#endregion
 
 
 #region Private functions
@@ -696,6 +732,20 @@ func _get_hand_collision_rids() -> Array[RID]:
 		ret.push_back(_xr_collision_hand.get_rid())
 
 	return ret
+
+
+func _body_has_useable_grab_point(body : PhysicsBody3D) -> bool:
+	for child in body.get_children():
+		if child is XRT2GrabPoint and child.enabled and child.useable:
+			return true
+	return false
+
+
+## Non-useable grab on an object that also has primary/useable grips (gun front grip, etc.).
+func _is_secondary_support_grab(body : PhysicsBody3D, grab_point : XRT2GrabPoint) -> bool:
+	if body == null or grab_point == null or grab_point.useable:
+		return false
+	return _body_has_useable_grab_point(body)
 
 
 func _get_closest_grabpoint(body : PhysicsBody3D, hand_position : Vector3) -> XRT2GrabPoint:
