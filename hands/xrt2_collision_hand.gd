@@ -246,9 +246,14 @@ var _ghost_skeleton: Skeleton3D
 var _controller_tracker: XRControllerTracker
 var _pickup: XRT2Pickup
 var _was_parent_basis: Basis
+var _was_parent_transform: Transform3D
 
 var _force_teleport_allowed : bool = true
 var _force_teleport : bool = false
+# Extra frames to follow XROrigin after teleport (PlayerBody floor-snaps afterward).
+var _sticky_origin_follow: int = 0
+# Held rigidbodies frozen during a force-teleport; unfrozen next physics frame.
+var _held_bodies_to_unfreeze: Array[RigidBody3D] = []
 
 var _last_tracked_transform : Transform3D
 
@@ -310,8 +315,22 @@ func get_collision_parent() -> CollisionObject3D:
 
 #region Public Action API
 func _force_teleport_behavior():
-	if _force_teleport_allowed:
-		_force_teleport = true
+	if not _force_teleport_allowed:
+		return
+
+	# Apply immediately. Waiting until the next physics frame leaves the
+	# top-level hand/held object in the pre-turn pose for a full frame.
+	_apply_origin_delta_to_hand_and_held()
+	freeze = true
+	_force_teleport = true
+	# PlayerBody runs after this hand and may still move XROrigin (floor snap).
+	_sticky_origin_follow = 3
+
+
+func _on_player_moved_follow_origin(_delta_transform: Transform3D) -> void:
+	if _sticky_origin_follow <= 0:
+		return
+	_apply_origin_delta_to_hand_and_held()
 
 ## Returns true if hand tracking API is used
 func get_is_hand_tracking() -> bool:
@@ -602,11 +621,14 @@ func _ready():
 		# Hands shouldn't collide with a parent collision object
 		add_collision_exception_with(_parent_body)
 		_parent_body.add_collision_exception_with(self)
+		if _parent_body.has_signal("player_moved"):
+			_parent_body.player_moved.connect(_on_player_moved_follow_origin)
 
 	var parent : Node3D = get_parent()
 	if parent:
 		# Store this just in case we need to calculate our parents rotational velocity.
 		_was_parent_basis = parent.global_basis
+		_was_parent_transform = parent.global_transform
 
 	# If we have a pickup function, get it
 	_pickup = XRT2Pickup.get_pickup(self)
@@ -638,6 +660,7 @@ func _physics_process(delta):
 	if mode == CollisionHandMode.DISABLED:
 		freeze = true
 		_was_parent_basis = parent_transform.basis
+		_was_parent_transform = parent_transform
 		return
 
 	var target : Transform3D = get_tracked_transform()
@@ -659,18 +682,12 @@ func _physics_process(delta):
 		freeze = true
 		global_transform = target
 		_was_parent_basis = parent_transform.basis
+		_was_parent_transform = parent_transform
 		return
 
 	# We got this far, make sure we're unfrozen and let Godot position our hand.
-	if freeze:
-		
-		if _pickup and _pickup._picked_up is RigidBody3D:
-			# UnFreeze body
-			var rigid_body: RigidBody3D = _pickup._picked_up as RigidBody3D
-			rigid_body.freeze = false
-			rigid_body.linear_velocity = Vector3()
-			rigid_body.angular_velocity = Vector3()
-		
+	if freeze and not _force_teleport and _sticky_origin_follow <= 0:
+		_unfreeze_teleported_held_bodies()
 		freeze = false
 		linear_velocity = Vector3()
 		angular_velocity = Vector3()
@@ -718,40 +735,48 @@ func _physics_process(delta):
 				_pickup.drop_held_object()
 				
 	# Handle hand too far from target tracking target.
-	if global_position.distance_to(target.origin) > teleport_distance or _force_teleport:
-
-		var safe_target := get_safe_sweep_target(target) if _force_teleport else target
-
-		if _pickup and _pickup._picked_up is RigidBody3D:
-			if _pickup.is_primary():
-				var rigid_body: RigidBody3D = _pickup._picked_up as RigidBody3D
-
-				# Preserve held object's offset from the hand.
-				var offset := global_transform.affine_inverse() * rigid_body.global_transform
-				rigid_body.global_transform = safe_target * offset
-				rigid_body.reset_physics_interpolation()
+	var did_force_teleport := false
+	if _force_teleport or _sticky_origin_follow > 0:
+		# Origin delta already applied in the teleport/turn signal and any
+		# following PlayerBody origin corrections (floor snap).
+		did_force_teleport = true
+		_force_teleport = false
+		if _sticky_origin_follow > 0:
+			_sticky_origin_follow -= 1
+		freeze = true
+		linear_velocity = Vector3()
+		angular_velocity = Vector3()
+	elif global_position.distance_to(target.origin) > teleport_distance:
+		var safe_target := target
+		_teleport_held_bodies_with_hand(global_transform, safe_target)
 
 		freeze = true
 		global_transform = safe_target
-		_force_teleport = false
 
+		linear_velocity = Vector3()
+		angular_velocity = Vector3()
 		reset_physics_interpolation()
 
 		if _parent_body:
 			_parent_body.reset_physics_interpolation()
 
-	# Apply linear motion to hands.
-	XRT2Helper.apply_force_to_target(delta, self, target.origin,
-		1.0, parent_linear_velocity, parent_angular_velocity, parent_global_position
-	)
+	# Do not apply tracking forces the same frame as a player teleport/turn.
+	# Parent snap-turn angular velocity would double-rotate the hand and yank
+	# the jointed object (visible dip + slide click detectors).
+	if not did_force_teleport:
+		# Apply linear motion to hands.
+		XRT2Helper.apply_force_to_target(delta, self, target.origin,
+			1.0, parent_linear_velocity, parent_angular_velocity, parent_global_position
+		)
 
-	# Apply angular motion to hands.
-	XRT2Helper.apply_torque_to_target(
-		delta, self, target.basis, 1.0, parent_angular_velocity, parent_global_basis
-	)
+		# Apply angular motion to hands.
+		XRT2Helper.apply_torque_to_target(
+			delta, self, target.basis, 1.0, parent_angular_velocity, parent_global_basis
+		)
 
 	# Remember this in case we need it
 	_was_parent_basis = parent_transform.basis
+	_was_parent_transform = parent_transform
 	_last_tracked_transform = target
 
 	# Our hand should now be positioned so we can do our ghost logic.
@@ -835,7 +860,76 @@ func _update_target() -> void:
 		if mode != CollisionHandMode.DISABLED:
 			# Reposition to our target override
 			global_transform = _target_override.global_transform * _target_offset
-			
+
+
+func _teleport_held_bodies_with_hand(from_hand: Transform3D, to_hand: Transform3D) -> void:
+	_teleport_held_bodies(to_hand * from_hand.affine_inverse())
+
+
+func _apply_origin_delta_to_hand_and_held() -> void:
+	var parent: Node3D = get_parent()
+	var current_parent := parent.global_transform if parent else Transform3D()
+	var parent_delta := current_parent * _was_parent_transform.affine_inverse()
+	parent_delta.basis = parent_delta.basis.orthonormalized()
+
+	var moved := parent_delta.origin.length_squared() > 0.00000001
+	if not moved:
+		var angle := parent_delta.basis.get_rotation_quaternion().get_angle()
+		moved = angle > 0.0001
+	if not moved:
+		return
+
+	global_transform = parent_delta * global_transform
+	linear_velocity = Vector3()
+	angular_velocity = Vector3()
+	reset_physics_interpolation()
+	_teleport_held_bodies(parent_delta)
+	_was_parent_transform = current_parent
+	_was_parent_basis = current_parent.basis
+
+
+func _teleport_held_bodies(delta: Transform3D) -> void:
+	if not _pickup or not _pickup.is_primary():
+		return
+	if not _pickup._picked_up is RigidBody3D:
+		return
+
+	var root: RigidBody3D = _pickup._picked_up
+	for body in _collect_held_rigid_bodies(root):
+		if not is_instance_valid(body):
+			continue
+		body.global_transform = delta * body.global_transform
+		body.linear_velocity = Vector3()
+		body.angular_velocity = Vector3()
+		body.reset_physics_interpolation()
+		if not body.freeze:
+			body.freeze = true
+			_held_bodies_to_unfreeze.append(body)
+
+
+func _collect_held_rigid_bodies(root: Node) -> Array[RigidBody3D]:
+	var bodies: Array[RigidBody3D] = []
+	_collect_held_rigid_bodies_recursive(root, bodies)
+	return bodies
+
+
+func _collect_held_rigid_bodies_recursive(node: Node, bodies: Array[RigidBody3D]) -> void:
+	if node is RigidBody3D:
+		bodies.append(node)
+	for child in node.get_children():
+		_collect_held_rigid_bodies_recursive(child, bodies)
+
+
+func _unfreeze_teleported_held_bodies() -> void:
+	for body in _held_bodies_to_unfreeze:
+		if not is_instance_valid(body):
+			continue
+		body.freeze = false
+		body.linear_velocity = Vector3()
+		body.angular_velocity = Vector3()
+	_held_bodies_to_unfreeze.clear()
+
+
 func get_safe_sweep_target(target: Transform3D) -> Transform3D:
 	var start := global_transform
 	var distance := start.origin.distance_to(target.origin)
