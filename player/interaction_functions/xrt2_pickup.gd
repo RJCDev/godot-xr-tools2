@@ -594,7 +594,6 @@ func _process(_delta):
 	if not _picked_up:
 		_update_closest_object()
 
-	var was_grab = _is_grab
 	var was_pick_pressed := _was_pick_pressed
 	var grip_now := _is_action_pressed(grab_action, _was_drop_pressed)
 	var pick_now := _is_action_pressed(pick_action, _was_pick_pressed)
@@ -656,33 +655,35 @@ func _process(_delta):
 			try_pickup.emit(self, _closest_object.body)
 			return
 	else:
-		if grip_now != _was_drop_pressed:
-			_was_drop_pressed = grip_now
-			if grab_toggle:
-				if grip_now:
-					_is_grab = not _is_grab
-					if _is_grab:
-						_pick_input = grab_action
-			else:
-				_is_grab = grip_now
-				if grip_now:
-					_pick_input = grab_action
+		# Empty-hand pickup: grip OR trigger press edge.
+		# Do not sticky-latch while holding nothing (that blocked later trigger pickups).
+		# Do not clear _is_grab after try_pickup — grab is networked and sticky
+		# items (keys) drop immediately if _is_grab is false when LocalGrab lands.
+		var grip_pressed_edge := grip_now and not _was_drop_pressed
+		_was_drop_pressed = grip_now
+		_was_pick_pressed = pick_now
 
-		if pick_now != _was_pick_pressed:
-			_was_pick_pressed = pick_now
-			if pick_now:
-				_is_grab = true
-				_pick_input = pick_action
+		var want_pickup := false
+		if grip_pressed_edge:
+			_pick_input = grab_action
+			want_pickup = true
+		elif pick_pressed_edge:
+			_pick_input = pick_action
+			want_pickup = true
 
 		if InputMap.has_action(grab_action) and Input.is_action_just_pressed(grab_action):
-			_is_grab = not _is_grab
-			if _is_grab:
-				_pick_input = grab_action
+			_pick_input = grab_action
+			want_pickup = true
 
-		if not _block_grab_until_release and not was_grab and _is_grab \
+		if want_pickup and not _block_grab_until_release \
 				and _closest_object and is_instance_valid(_closest_object.body):
+			_is_grab = true
 			try_pickup.emit(self, _closest_object.body)
 			return
+
+		# No object this press: forget intent so a later trigger can still pick up.
+		if not _is_grab:
+			_pick_input = ""
 
 	# Closest is already refreshed when empty-handed; only refresh here while holding
 	# (highlights are suppressed while holding anyway).
