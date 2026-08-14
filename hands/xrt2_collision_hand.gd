@@ -889,14 +889,20 @@ func _apply_origin_delta_to_hand_and_held() -> void:
 
 
 func _teleport_held_bodies(delta: Transform3D) -> void:
-	if not _pickup or not _pickup.is_primary():
-		return
-	if not _pickup._picked_up is RigidBody3D:
+	if not _pickup or not _pickup._picked_up is RigidBody3D:
 		return
 
 	var root: RigidBody3D = _pickup._picked_up
+
+	# Support grip on the same body as another hand: that primary moves it.
+	if not _pickup.is_primary() and _is_directly_held_by_other_pickup(root):
+		return
+
 	for body in _collect_held_rigid_bodies(root):
 		if not is_instance_valid(body):
+			continue
+		# Pump/slide etc. held by the other hand — that hand applies the delta.
+		if body != root and _is_directly_held_by_other_pickup(body):
 			continue
 		body.global_transform = delta * body.global_transform
 		body.linear_velocity = Vector3()
@@ -905,6 +911,17 @@ func _teleport_held_bodies(delta: Transform3D) -> void:
 		if not body.freeze:
 			body.freeze = true
 			_held_bodies_to_unfreeze.append(body)
+
+
+func _is_directly_held_by_other_pickup(body: PhysicsBody3D) -> bool:
+	if body == null or _pickup == null:
+		return false
+	for other in XRT2Pickup._pickup_handlers:
+		if other == _pickup or not is_instance_valid(other):
+			continue
+		if other._picked_up == body:
+			return true
+	return false
 
 
 func _collect_held_rigid_bodies(root: Node) -> Array[RigidBody3D]:
