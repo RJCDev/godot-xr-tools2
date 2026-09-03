@@ -60,6 +60,7 @@ extends Node3D
 		if is_inside_tree():
 			_update_show_hand()
 
+## If rotation_offset changes in the editor, refresh the preview hand.
 @export var rotation_offset : Vector3:
 	set(value):
 		rotation_offset = value
@@ -217,9 +218,18 @@ func _update_show_hand():
 		if bone_idx != -1:
 			var bone_transform : Transform3D = skeleton.get_bone_global_pose(bone_idx)
 			var bone_offset : Transform3D = Transform3D(orient_to_godot, Vector3())
-			# Preview includes hand_offset so editor pose matches runtime seating.
-			_hand_mesh.transform = Transform3D(Basis(), hand_offset) \
-					* (bone_transform * bone_offset).inverse()
+			# Match runtime get_hand_transform in grab-local space:
+			# basis *= rotation_offset, then origin = basis * hand_offset.
+			var seat := Transform3D(
+				Basis.from_euler(Vector3(
+					deg_to_rad(rotation_offset.x),
+					deg_to_rad(rotation_offset.y),
+					deg_to_rad(rotation_offset.z)
+				)),
+				Vector3.ZERO
+			)
+			seat.origin = seat * hand_offset
+			_hand_mesh.transform = seat * (bone_transform * bone_offset).inverse()
 
 		_finger_pose_modifier = XRT2FingerPosesModifier3D.new()
 		_finger_pose_modifier.finger_poses = finger_poses

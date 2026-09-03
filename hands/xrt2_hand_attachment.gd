@@ -40,6 +40,10 @@ extends Node3D
 			_on_skeleton_updated()
 
 var _updating : bool = false
+## Scene-file local pose, captured before skeleton overwrites this node.
+var _authored_local : Transform3D = Transform3D()
+var _has_authored_local : bool = false
+var _pickup: XRT2Pickup
 
 # Verifies if we have a valid configuration.
 func _get_configuration_warnings() -> PackedStringArray:
@@ -66,12 +70,37 @@ func _validate_property(property):
 
 
 func _enter_tree():
+	if not _has_authored_local:
+		_authored_local = transform
+		_has_authored_local = true
+
 	var parent = get_parent()
 	if parent and parent is XRT2CollisionHand:
 		parent.hand_mesh_changed.connect(_on_hand_mesh_changed)
 		parent.skeleton_updated.connect(_on_skeleton_updated)
 
+	_cache_pickup()
 	_on_skeleton_updated()
+
+
+func _ready():
+	_cache_pickup()
+
+
+## Palm-relative pose from the scene, not the live tracked metacarpal.
+func get_authored_local_transform() -> Transform3D:
+	return _authored_local if _has_authored_local else transform
+
+
+func get_authored_global_transform() -> Transform3D:
+	var parent = get_parent()
+	if parent is Node3D and _has_authored_local:
+		var xf: Transform3D = (parent as Node3D).global_transform * _authored_local
+		xf.basis = xf.basis.orthonormalized()
+		return xf
+	var live := global_transform
+	live.basis = live.basis.orthonormalized()
+	return live
 
 
 func _exit_tree():
@@ -86,13 +115,31 @@ func _on_hand_mesh_changed():
 	_on_skeleton_updated()
 
 
+func _cache_pickup() -> void:
+	_pickup = null
+	for child in get_children():
+		if child is XRT2Pickup:
+			_pickup = child
+			return
+
+
+func _should_pin_authored_local() -> bool:
+	return _pickup != null \
+			and _pickup.has_method("is_useable_primary_hold") \
+			and _pickup.is_useable_primary_hold()
+
+
 func _on_skeleton_updated():
 	if _updating:
 		return
 	_updating = true
 
 	var parent = get_parent()
-	if not bone_name.is_empty() and parent and parent is XRT2CollisionHand:
+	if _should_pin_authored_local() and _has_authored_local:
+		# Keep the pickup/joint in palm space while holding. Following the live
+		# metacarpal moved the joint origin every skeleton tick.
+		transform = _authored_local
+	elif not bone_name.is_empty() and parent and parent is XRT2CollisionHand:
 		transform = parent.get_bone_transform(bone_name)
 	else:
 		transform = Transform3D()

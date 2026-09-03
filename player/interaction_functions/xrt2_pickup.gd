@@ -79,11 +79,12 @@ static var _highlighted_bodies : Dictionary[Node3D, HighlightedBody]
 			_update_detection_radius()
 
 ## Max distance from the hand to a secondary support grip (foregrip, etc.).
-## Keep tight so the bolt/slide reload zone is not swallowed by the brace.
-@export var secondary_grab_distance : float = 0.08
+## Wide enough that colliding controllers can still reach the brace; bolt/slide
+## still uses [member detection_radius] and wins when it is closer.
+@export var secondary_grab_distance : float = 0.16
 
 ## Mesh highlight radius around a secondary support grip point.
-@export var secondary_highlight_radius : float = 0.08
+@export var secondary_highlight_radius : float = 0.16
 
 ## Primary grab/drop action (grip). Also used for sticky drop.
 @export var grab_action : String = "grab"
@@ -297,13 +298,34 @@ func reseat_held_to_attachment() -> bool:
 		return false
 	if _is_secondary_support_grab(_picked_up, _grab_point):
 		return false
-	var attachment := get_parent() as XRT2HandAttachment
-	if attachment:
-		attachment._on_skeleton_updated()
 	_place_object_at_hand_attachment(_picked_up)
+	# Joint was created at an older relative pose — rebuild so it doesn't undo the seat.
+	_rebuild_held_joint(_picked_up)
 	if _xr_collision_hand and _xr_collision_hand.has_method("begin_pickup_settle"):
 		_xr_collision_hand.begin_pickup_settle()
 	return true
+
+
+## Recreate the soft joint at the current hand/gun pose so it doesn't fight a reseat.
+func _rebuild_held_joint(which: PhysicsBody3D) -> void:
+	if not _xr_collision_hand or not is_instance_valid(which):
+		return
+	if _joint:
+		remove_child(_joint)
+		_joint.queue_free()
+		_joint = null
+	_joint = Generic6DOFJoint3D.new()
+	add_child(_joint, false, Node.INTERNAL_MODE_BACK)
+	_joint.node_a = _xr_collision_hand.get_path()
+	_joint.node_b = which.get_path()
+
+
+## True when this hand holds a primary useable grip (gun stock / pistol grip).
+func is_useable_primary_hold() -> bool:
+	return is_instance_valid(_picked_up) \
+			and is_instance_valid(_grab_point) \
+			and _grab_point.useable \
+			and not _should_snap_hand_to_grab(_picked_up, _grab_point)
 
 
 func _pickup_object_internal(which : PhysicsBody3D, ignore_grab_distance : bool) -> void:
@@ -341,9 +363,6 @@ func _pickup_object_internal(which : PhysicsBody3D, ignore_grab_distance : bool)
 				return
 			
 			dest_transform.basis = dest_transform.basis.orthonormalized()
-			var attachment := get_parent() as XRT2HandAttachment
-			if attachment:
-				attachment._on_skeleton_updated()
 
 			var is_hand_to_object := _should_snap_hand_to_grab(which, _grab_point)
 			if is_hand_to_object:
@@ -351,10 +370,7 @@ func _pickup_object_internal(which : PhysicsBody3D, ignore_grab_distance : bool)
 			else:
 				_place_object_at_hand_attachment(which)
 
-			_joint = Generic6DOFJoint3D.new()
-			add_child(_joint, false, Node.INTERNAL_MODE_BACK)
-			_joint.node_a = _xr_collision_hand.get_path()
-			_joint.node_b = which.get_path()
+			_rebuild_held_joint(which)
 
 			which.add_collision_exception_with(_xr_collision_hand)
 
@@ -467,9 +483,6 @@ func _pickup_object_internal(which : PhysicsBody3D, ignore_grab_distance : bool)
 	if _glue_primary_after_pickup:
 		_glue_primary_after_pickup = false
 		if is_instance_valid(_grab_point) and is_instance_valid(_picked_up):
-			var attachment := get_parent() as XRT2HandAttachment
-			if attachment:
-				attachment._on_skeleton_updated()
 			_place_object_at_hand_attachment(_picked_up)
 		if _xr_collision_hand and _xr_collision_hand.has_method("begin_pickup_settle"):
 			_xr_collision_hand.begin_pickup_settle()
@@ -586,6 +599,9 @@ func drop_held_object() -> void:
 	_block_grab_until_release = true
 	
 	dropped.emit(self, was_picked_up, other == null)
+	# Pickup cleared brace highlight; closest often stays the same Alt point so
+	# _update_closest_object would skip. Force a fresh proximity pass.
+	_closest_object = null
 	
 func _re_enable_collision(body: Node3D) -> void:
 	if body is PhysicsBody3D and _drop_collision_grace.has(body):
@@ -706,12 +722,23 @@ func _place_hand_at_grab_point(dest_transform: Transform3D) -> void:
 	_xr_collision_hand.force_update_transform()
 
 
-## Seat the body so its grab-point hand pose matches the metacarpal attachment.
+## Seat to the scene-authored HandAttachment local (Player.tscn), not the live
+## bone. Live/rest metacarpal is ~ (0.01, 0, 0); the authored pose is
+## ~ (0.025, 0, 0.04) — that was the only grab that looked correct.
+func _get_primary_seat_attachment_xf() -> Transform3D:
+	var attachment := get_parent() as XRT2HandAttachment
+	if attachment and attachment.has_method("get_authored_global_transform"):
+		return attachment.get_authored_global_transform()
+	var attachment_xf : Transform3D = get_parent().global_transform
+	attachment_xf.basis = attachment_xf.basis.orthonormalized()
+	return attachment_xf
+
+
+## Seat the body so its grab-point hand pose matches the stable palm metacarpal.
 func _place_object_at_hand_attachment(which: PhysicsBody3D) -> void:
 	if not is_instance_valid(_grab_point) or not is_instance_valid(which):
 		return
-	var attachment_xf : Transform3D = get_parent().global_transform
-	attachment_xf.basis = attachment_xf.basis.orthonormalized()
+	var attachment_xf : Transform3D = _get_primary_seat_attachment_xf()
 	var grab_hand_xf : Transform3D = _grab_point.get_hand_transform(attachment_xf.origin)
 	grab_hand_xf.basis = grab_hand_xf.basis.orthonormalized()
 	var delta : Transform3D = attachment_xf * grab_hand_xf.affine_inverse()
@@ -775,7 +802,7 @@ func _on_pickup_orient_finished() -> void:
 		_snap_hand_to_current_grab_point()
 		if _xr_collision_hand and _xr_collision_hand.has_method("_clear_hand_mesh_grab_lock"):
 			_xr_collision_hand._clear_hand_mesh_grab_lock()
-				
+
 #endregion
 
 
@@ -1017,15 +1044,8 @@ func _process(_delta):
 		if not _is_grab:
 			_pick_input = ""
 
-	# Closest is already refreshed when empty-handed; only refresh here while holding
-	# (highlights are suppressed while holding anyway).
-	if _picked_up:
-		if _grab_point and _uses_local_grab_highlight(_picked_up, _grab_point):
-			_remove_highlight(_grab_point)
-		return
-
-	# Highlight pass for empty hand (closest already updated above).
-	# No further closest recompute needed this frame.
+	# Empty-hand highlight uses closest from the start of this frame.
+	# Holding skips proximity scans; pickup already cleared highlight.
 #endregion
 
 
@@ -1130,6 +1150,8 @@ func _grab_point_allowed_for_pickup(
 
 
 ## Left primary → right-hand Alt; right primary → left-hand Alt.
+## Uses the grab-point hand flags on the *support* point. Primary stock grips
+## often allow both hands, so do not require the primary to be left-only/right-only.
 func _is_opposite_secondary_for_primary(
 	primary_gp: XRT2GrabPoint, secondary_gp: XRT2GrabPoint
 ) -> bool:
@@ -1137,26 +1159,22 @@ func _is_opposite_secondary_for_primary(
 		return false
 	if secondary_gp.useable or secondary_gp.exclusive:
 		return false
-
-	var primary_left_only := primary_gp.left_hand and not primary_gp.right_hand
-	var primary_right_only := primary_gp.right_hand and not primary_gp.left_hand
-	var secondary_left_only := secondary_gp.left_hand and not secondary_gp.right_hand
-	var secondary_right_only := secondary_gp.right_hand and not secondary_gp.left_hand
-
-	if primary_left_only:
-		return secondary_right_only
-	if primary_right_only:
-		return secondary_left_only
-	return false
+	return true
 
 
 func _update_closest_object() -> void:
 	var was_closest_object : ClosestObject = _closest_object
 	_closest_object = _get_closest()
 
-	if was_closest_object and _closest_object \
+	var same := was_closest_object and _closest_object \
 			and was_closest_object.body == _closest_object.body \
-			and was_closest_object.grab_point == _closest_object.grab_point:
+			and was_closest_object.grab_point == _closest_object.grab_point
+
+	if same:
+		if _closest_object and is_instance_valid(_closest_object.body) \
+				and not _should_skip_closest_highlight(_closest_object) \
+				and not _is_closest_highlighted(_closest_object):
+			_apply_highlight_for_closest(_closest_object)
 		return
 
 	if was_closest_object and is_instance_valid(was_closest_object.body):
@@ -1165,10 +1183,8 @@ func _update_closest_object() -> void:
 		)
 
 	if _closest_object and is_instance_valid(_closest_object.body):
-		if _closest_object.grab_point \
-				and _should_skip_grab_point_highlight(_closest_object.grab_point):
+		if _should_skip_closest_highlight(_closest_object):
 			return
-
 		_apply_highlight_for_closest(_closest_object)
 
 
@@ -1319,8 +1335,14 @@ func _should_skip_grab_point_highlight(grab_point: XRT2GrabPoint) -> bool:
 	return false
 
 
-func _get_highlight_target(closest : ClosestObject) -> Node3D:
-	return _get_highlight_key(closest.body, closest.grab_point)
+func _should_skip_closest_highlight(closest: ClosestObject) -> bool:
+	return closest.grab_point != null \
+			and _should_skip_grab_point_highlight(closest.grab_point)
+
+
+func _is_closest_highlighted(closest: ClosestObject) -> bool:
+	var key := _get_highlight_key(closest.body, closest.grab_point)
+	return key != null and _highlighted_bodies.has(key)
 
 
 func _get_highlight_key(
@@ -1336,8 +1358,11 @@ func _apply_highlight_for_closest(closest: ClosestObject) -> void:
 		_add_near_grab_point_highlight(
 			_get_assembly_root(closest.body), closest.grab_point
 		)
-	else:
-		_add_highlight(closest.body)
+		return
+	# Primary / whole-object highlight only when this is not a brace/bolt point.
+	if closest.grab_point and not closest.grab_point.useable:
+		return
+	_add_highlight(closest.body)
 
 
 func _clear_highlight_for_closest(
@@ -1587,6 +1612,42 @@ func _highlight_meshes_near_point(
 	return ret
 
 
+## Distance from a world point to the mesh AABB (not the node origin).
+func _mesh_aabb_distance_to_point(mesh_instance: MeshInstance3D, point: Vector3) -> float:
+	var aabb: AABB = mesh_instance.get_aabb()
+	if aabb.size == Vector3.ZERO:
+		return mesh_instance.global_position.distance_to(point)
+	var world_aabb: AABB = mesh_instance.global_transform * aabb
+	var closest := Vector3(
+		clampf(point.x, world_aabb.position.x, world_aabb.end.x),
+		clampf(point.y, world_aabb.position.y, world_aabb.end.y),
+		clampf(point.z, world_aabb.position.z, world_aabb.end.z)
+	)
+	return closest.distance_to(point)
+
+
+func _mesh_longest_world_axis(mesh_instance: MeshInstance3D) -> float:
+	var aabb: AABB = mesh_instance.get_aabb()
+	var scale := mesh_instance.global_transform.basis.get_scale().abs()
+	var size := Vector3(
+		aabb.size.x * scale.x, aabb.size.y * scale.y, aabb.size.z * scale.z
+	)
+	return maxf(size.x, maxf(size.y, size.z))
+
+
+## Brace: small parts near the grab. Skip the full-gun mesh (its AABB covers the barrel).
+func _mesh_is_brace_highlight(mesh_instance: MeshInstance3D, point: Vector3, radius: float) -> bool:
+	if not mesh_instance.visible:
+		return false
+	var origin_dist := mesh_instance.global_position.distance_to(point)
+	if origin_dist <= radius:
+		return true
+	# Tiny fittings whose origin sits on the receiver but geometry reaches the brace.
+	if _mesh_longest_world_axis(mesh_instance) > 0.22:
+		return false
+	return _mesh_aabb_distance_to_point(mesh_instance, point) <= radius
+
+
 func _collect_meshes_near_point(
 	node: Node, point: Vector3, radius: float, ret: Dictionary[MeshInstance3D, Material]
 ) -> void:
@@ -1595,7 +1656,7 @@ func _collect_meshes_near_point(
 	if node is MeshInstance3D:
 		var mesh_instance: MeshInstance3D = node
 		if mesh_instance.visible \
-				and mesh_instance.global_position.distance_to(point) <= radius:
+				and _mesh_is_brace_highlight(mesh_instance, point, radius):
 			ret[mesh_instance] = mesh_instance.material_overlay
 			mesh_instance.material_overlay = _highlight_material
 	for child in node.get_children():

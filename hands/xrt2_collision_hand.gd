@@ -494,12 +494,13 @@ func _capture_held_snap_locals() -> void:
 	if not _pickup.is_primary() and _is_directly_held_by_other_pickup(root):
 		return
 
+	var anchor := _get_held_snap_anchor_xf()
 	for body in _collect_held_rigid_bodies(root):
 		if not is_instance_valid(body):
 			continue
 		if body != root and _is_directly_held_by_other_pickup(body):
 			continue
-		_held_snap_local[body] = global_transform.affine_inverse() * body.global_transform
+		_held_snap_local[body] = anchor.affine_inverse() * body.global_transform
 
 
 func _sync_held_to_snap_locals() -> void:
@@ -515,13 +516,20 @@ func _sync_held_to_snap_locals() -> void:
 		if not is_instance_valid(body) or body not in current_bodies:
 			_held_snap_local.erase(body)
 
+	var anchor := _get_held_snap_anchor_xf()
 	for body: RigidBody3D in _held_snap_local:
 		if not is_instance_valid(body):
 			continue
-		body.global_transform = global_transform * _held_snap_local[body]
+		body.global_transform = anchor * _held_snap_local[body]
 		body.linear_velocity = Vector3()
 		body.angular_velocity = Vector3()
 		body.reset_physics_interpolation()
+
+
+## Keep held bodies glued to the palm during settle. Following the live
+## metacarpal reorients the gun as fingers/tracking move.
+func _get_held_snap_anchor_xf() -> Transform3D:
+	return global_transform
 
 
 func _freeze_held_snap_bodies() -> void:
@@ -1060,7 +1068,8 @@ func _process(_delta: float) -> void:
 		else:
 			_clear_hand_mesh_grab_lock()
 	_was_pickup_orienting = orienting
-	_sync_hand_mesh_to_grab_point()
+	if _hand_mesh_grab_locked or _should_sync_hand_mesh_to_grab():
+		_sync_hand_mesh_to_grab_point()
 
 
 func _should_sync_hand_mesh_to_grab() -> bool:
@@ -1294,9 +1303,8 @@ func _physics_process(delta):
 	# Ghost mesh tracks the controller for reach-limit feedback only.
 	if _ghost_mesh:
 		_ghost_mesh.global_transform = target
-		if freeze and _ghost_skeleton and _hand_skeleton:
-			for i in _ghost_skeleton.get_bone_count():
-				_hand_skeleton.set_bone_pose(i, _ghost_skeleton.get_bone_pose(i))
+		# Bone copy already happens in _on_skeleton_updated. Extra copy while
+		# frozen doubled skeleton work every physics tick during settle/teleport.
 
 	# Our hand should now be positioned so we can do our ghost logic.
 	if _ghost_mesh:
