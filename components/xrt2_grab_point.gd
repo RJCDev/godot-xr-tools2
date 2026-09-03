@@ -67,6 +67,15 @@ extends Node3D
 		if is_inside_tree():
 			_update_show_hand()
 
+## Local offset applied only when seating the hand (metacarpal attachment).
+## Detection / highlight still use this node's origin, so you can place the
+## grab point on the mesh and nudge the hand without enlarging grab range.
+@export var hand_offset : Vector3 = Vector3.ZERO:
+	set(value):
+		hand_offset = value
+		if is_inside_tree():
+			_update_show_hand()
+
 ## If [code]true[/code] and object is picked up by this grab point,
 ## it can not be picked up by another grab point.
 @export var exclusive : bool = false
@@ -141,8 +150,19 @@ var _finger_pose_modifier: XRT2FingerPosesModifier3D
 ## Returned transform is in global space.
 func get_hand_transform(hand_position: Vector3) -> Transform3D:
 	var t = global_transform
-	t.basis = t.basis * Basis.from_euler(Vector3(deg_to_rad(rotation_offset.x), deg_to_rad(rotation_offset.y), deg_to_rad(rotation_offset.z)))
+	t.basis = t.basis * Basis.from_euler(Vector3(
+		deg_to_rad(rotation_offset.x),
+		deg_to_rad(rotation_offset.y),
+		deg_to_rad(rotation_offset.z)
+	))
+	# Seat the metacarpal with an optional local nudge (palm vs node origin).
+	t.origin = t * hand_offset
 	return t
+
+
+## World position used for proximity / highlight (ignores hand_offset).
+func get_detection_origin() -> Vector3:
+	return global_position
 #endregion
 
 
@@ -197,7 +217,9 @@ func _update_show_hand():
 		if bone_idx != -1:
 			var bone_transform : Transform3D = skeleton.get_bone_global_pose(bone_idx)
 			var bone_offset : Transform3D = Transform3D(orient_to_godot, Vector3())
-			_hand_mesh.transform = (bone_transform * bone_offset).inverse()
+			# Preview includes hand_offset so editor pose matches runtime seating.
+			_hand_mesh.transform = Transform3D(Basis(), hand_offset) \
+					* (bone_transform * bone_offset).inverse()
 
 		_finger_pose_modifier = XRT2FingerPosesModifier3D.new()
 		_finger_pose_modifier.finger_poses = finger_poses
