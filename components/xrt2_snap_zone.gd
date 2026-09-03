@@ -70,6 +70,7 @@ var _object_in_grab_area : Array[PhysicsBody3D] = []
 var _remember_collision_layer : int
 var _remember_collision_mask: int
 var _joint : Generic6DOFJoint3D
+var _close_highlight_target : PhysicsBody3D = null
 
 func _ready():
 	# Set collision shape radius
@@ -101,6 +102,9 @@ func _physics_process(_delta):
 			
 		if not picked_up_object.is_in_group("dropped"):
 			drop_object()
+
+	_refresh_grab_area_objects()
+	_update_close_highlight()
 		
 	# Check for any object in range that can be grabbed
 	for o in _object_in_grab_area:
@@ -111,6 +115,11 @@ func _physics_process(_delta):
 		else:	
 			pick_up_object(o)
 		return
+
+	if snap_mode == SnapMode.DROPPED and not is_instance_valid(picked_up_object):
+		var nearby := _find_dropped_candidate_nearby()
+		if nearby:
+			pick_up_object(nearby)
 
 
 # Pickup Method: Drop the currently picked up object
@@ -162,25 +171,24 @@ func _on_snap_zone_body_entered(target: Node3D) -> void:
 	# Add to the list of objects in grab area
 	_object_in_grab_area.push_back(target)
 
-	# Show highlight when something could be snapped
-	if not is_instance_valid(picked_up_object):
-		close_highlight_updated.emit(target, enabled)
-
 # Called when a body leaves the snap zone
 func _on_snap_zone_body_exited(target: Node3D) -> void:
 	# Ensure the object is not in our list
 	_object_in_grab_area.erase(target)
 
 	target.remove_from_group("snap_zone")
-	
-	# Hide highlight when nothing could be snapped
-	if _object_in_grab_area.is_empty() && is_valid_object(target):
-		close_highlight_updated.emit(target, false)
 		
 
 func is_valid_object(target: Node3D) -> bool:
 	# Ignore objects already known about
 	if _object_in_grab_area.find(target) >= 0:
+		return false
+
+	return _matches_snap_filter(target)
+
+
+func _matches_snap_filter(target: Node) -> bool:
+	if not target is PhysicsBody3D:
 		return false
 
 	# Reject objects not in the required snap group
@@ -192,6 +200,95 @@ func is_valid_object(target: Node3D) -> bool:
 		return false
 
 	return true
+
+
+func _refresh_grab_area_objects() -> void:
+	for body in get_overlapping_bodies():
+		if not _matches_snap_filter(body):
+			continue
+		if _object_in_grab_area.find(body) >= 0:
+			continue
+		_object_in_grab_area.push_back(body)
+
+
+func _find_dropped_candidate_nearby() -> PhysicsBody3D:
+	var best: PhysicsBody3D = null
+	var best_distance := grab_distance * 1.5
+	var center := global_transform.origin
+
+	for body in get_overlapping_bodies():
+		if not body is PhysicsBody3D:
+			continue
+		if not body.is_in_group("dropped") or body.is_in_group("snap_zone"):
+			continue
+		if not _matches_snap_filter(body):
+			continue
+		var distance := body.global_position.distance_to(center)
+		if distance <= best_distance:
+			best_distance = distance
+			best = body
+
+	return best
+
+
+func _update_close_highlight() -> void:
+	if not enabled:
+		_set_close_highlight(null)
+		return
+
+	# Holstered item: show ring when a physics hand is in range (grab-out cue).
+	if is_instance_valid(picked_up_object):
+		if _is_hand_in_grab_area():
+			_set_close_highlight(picked_up_object)
+		else:
+			_set_close_highlight(null)
+		return
+
+	_set_close_highlight(_find_close_highlight_candidate())
+
+
+func _is_hand_in_grab_area() -> bool:
+	var center := global_transform.origin
+	var reach := grab_distance * 1.5
+
+	for body in get_overlapping_bodies():
+		if body == picked_up_object or not body is RigidBody3D:
+			continue
+		if _matches_snap_filter(body):
+			continue
+		if body.global_position.distance_to(center) <= reach:
+			return true
+
+	return false
+
+
+func _find_close_highlight_candidate() -> PhysicsBody3D:
+	var best: PhysicsBody3D = null
+	var best_distance := grab_distance * 1.5
+	var center := global_transform.origin
+
+	for body in get_overlapping_bodies():
+		if not body is PhysicsBody3D:
+			continue
+		if not _matches_snap_filter(body):
+			continue
+		var distance := body.global_position.distance_to(center)
+		if distance <= best_distance and (best == null or distance < best_distance):
+			best_distance = distance
+			best = body
+
+	return best
+
+
+func _set_close_highlight(target: PhysicsBody3D) -> void:
+	if target == _close_highlight_target:
+		return
+	if is_instance_valid(_close_highlight_target):
+		close_highlight_updated.emit(_close_highlight_target, false)
+	_close_highlight_target = target
+	if is_instance_valid(_close_highlight_target):
+		close_highlight_updated.emit(_close_highlight_target, true)
+
 
 # Test if this snap zone has a picked up object
 func has_snapped_object() -> bool:
@@ -242,7 +339,6 @@ func pick_up_object(target: PhysicsBody3D) -> void:
 	if is_instance_valid(picked_up_object):
 		has_picked_up.emit(picked_up_object)
 		highlight_updated.emit(self, false)
-		picked_up_object.set_collision_layer_value(4, false) # Not a dropped object anymore
 	
 	# Handle collision info
 	if target is RigidBody3D:
@@ -256,11 +352,14 @@ func pick_up_object(target: PhysicsBody3D) -> void:
 			
 			target.collision_layer = collision_layer_entered
 			target.collision_mask = 0
+			# Keep the grabbable layer so hands and snap zones can detect holstered items.
+			if collision_layer_entered != 0:
+				target.set_collision_layer_value(3, true)
 			
 	picked_up_object.add_to_group("snap_zone")
 	picked_up_object.add_to_group("dropped") # Just in case
 	
-	close_highlight_updated.emit(target, false)
+	_set_close_highlight(null)
 	
 	
 

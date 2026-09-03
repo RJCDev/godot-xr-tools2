@@ -29,6 +29,9 @@ extends Node3D
 ## Inform that this hand has picked up this object (also if this is the second hand).
 signal try_pickup(by : XRT2Pickup, what : PhysicsBody3D)
 
+## Trigger edge started a pickup attempt (before try_pickup).
+signal pick_trigger_engaged(by : XRT2Pickup, what : PhysicsBody3D)
+
 ## Inform that this hand has picked up this object (also if this is the second hand).
 signal picked_up(by : XRT2Pickup, what : PhysicsBody3D)
 
@@ -74,6 +77,12 @@ static var _highlighted_bodies : Dictionary[Node3D, HighlightedBody]
 		detection_radius = value
 		if is_inside_tree():
 			_update_detection_radius()
+
+## Max distance from the hand to a secondary support grip (foregrip, etc.).
+@export var secondary_grab_distance : float = 0.14
+
+## Mesh highlight radius around a secondary support grip point.
+@export var secondary_highlight_radius : float = 0.1
 
 ## Primary grab/drop action (grip). Also used for sticky drop.
 @export var grab_action : String = "grab"
@@ -129,6 +138,7 @@ var _block_grab_until_release : bool = false
 
 # What is currently our closest object
 var _closest_object : ClosestObject
+var _pending_pickup_grab_point : XRT2GrabPoint
 
 # What are we holding and by which grab point
 var _picked_up : PhysicsBody3D
@@ -138,6 +148,23 @@ var _grab_point : XRT2GrabPoint
 var _original_freeze_mode : RigidBody3D.FreezeMode
 var _original_collision_layer : int
 var _original_collision_mask : int
+
+# While the hand mesh tweens into the grab pose, keep held colliders off.
+var _orienting_pickup : bool = false
+var _orient_collision_restore : Dictionary = {}
+## Set during primary pickup; soft-joint reseat + settle after picked_up.emit.
+var _glue_primary_after_pickup : bool = false
+
+# Door/frame layers to ignore on single-body held items (walkie, etc.) while gripped.
+# Static world + teleport block + door — stripped while held to stop physics jitter
+# against props and door frames; post-teleport depenetration handles doors.
+const HELD_ENVIRONMENT_COLLISION_MASK := 385
+const PICKUP_ORIENT_TWEEN_DURATION := 0.05
+var _held_environment_mask_restore : Dictionary = {}
+
+# Keep player/hand collision exceptions briefly after drop so holster snap can settle.
+const DROP_COLLISION_GRACE_FRAMES := 8
+var _drop_collision_grace : Dictionary = {}
 
 # If true, we are the primary hand holding this object (for 2 handed)
 var _is_primary : bool = false
@@ -175,7 +202,17 @@ static func picked_up_by(what : PhysicsBody3D) -> XRT2Pickup:
 	# If we found one, it will be our secondary hand
 	return by
 
-## Returns true if we've picked up something (/are holding onto something)
+
+## Find which pickup holds this body or a parent rigidbody in the same assembly.
+static func _get_holder_pickup(body: PhysicsBody3D) -> XRT2Pickup:
+	var node: Node = body
+	while node:
+		if node is RigidBody3D:
+			var by := picked_up_by(node)
+			if by:
+				return by
+		node = node.get_parent()
+	return null
 func has_picked_up() -> bool:
 	if is_instance_valid(_picked_up):
 		return true
@@ -211,8 +248,64 @@ func cancel_pickup_attempt() -> void:
 func is_primary() -> bool:
 	return _is_primary
 
+
+## True while the grab-orient tween is running (colliders temporarily off).
+func is_orienting_pickup() -> bool:
+	return _orienting_pickup
+
+
+## True when a physics joint links the hand to the held body.
+func is_jointed_pickup() -> bool:
+	return _joint != null and is_instance_valid(_joint)
+
+
+## True when the held assembly contains multiple rigid bodies (e.g. rifle + slide).
+func is_multi_body_assembly() -> bool:
+	if not is_instance_valid(_picked_up):
+		return false
+	var bodies: Array[RigidBody3D] = []
+	_collect_orient_bodies(_get_assembly_root(_picked_up), bodies)
+	return bodies.size() > 1
+
+
 ## Pick up this object
 func pickup_object(which : PhysicsBody3D):
+	_pickup_object_internal(which, false)
+
+
+## Loadout holster draw: ignore grab-point max distance so hip draws always succeed.
+func force_pickup_object(which : PhysicsBody3D) -> bool:
+	if _picked_up == which:
+		_is_grab = true
+		return true
+	if _picked_up:
+		drop_held_object()
+	_pickup_object_internal(which, true)
+	if _picked_up == which:
+		_is_grab = true
+		_pick_input = grab_action
+		_was_drop_pressed = true
+		_was_pick_pressed = _is_action_pressed(pick_action, false)
+		return true
+	return false
+
+
+## After loadout draw anim returns to the tracked pose, re-seat the held item.
+func reseat_held_to_attachment() -> bool:
+	if not is_instance_valid(_picked_up) or not is_instance_valid(_grab_point):
+		return false
+	if _is_secondary_support_grab(_picked_up, _grab_point):
+		return false
+	var attachment := get_parent() as XRT2HandAttachment
+	if attachment:
+		attachment._on_skeleton_updated()
+	_place_object_at_hand_attachment(_picked_up)
+	if _xr_collision_hand and _xr_collision_hand.has_method("begin_pickup_settle"):
+		_xr_collision_hand.begin_pickup_settle()
+	return true
+
+
+func _pickup_object_internal(which : PhysicsBody3D, ignore_grab_distance : bool) -> void:
 	if not which is RigidBody3D and not which is PhysicalBone3D:
 		push_warning("Picking up objects other than Rigidbody and PhysicalBone3D is currently disabled.")
 		return
@@ -221,11 +314,16 @@ func pickup_object(which : PhysicsBody3D):
 			# Remember our current hand transform.
 			var hand_transform : Transform3D = _xr_collision_hand.global_transform
 
-			# Find our grab point (if any).
-			# Note, we're already handled our exclusive logic, can ignore that here.
-			_grab_point = _get_closest_grabpoint(which, global_position)
+			# Prefer the staged grab point from the trigger/grip edge (keeps secondary
+			# brace vs primary fire gating aligned with what the hand highlighted).
+			# Holster force-pickup has no stage — resolve closest instead.
+			var staged := _consume_pending_grab_point(which)
+			if staged:
+				_grab_point = staged
+			else:
+				_grab_point = _get_closest_grabpoint(which, global_position, ignore_grab_distance)
 			# Figure out our grab position
-			var dest_transform : Transform3D 
+			var dest_transform : Transform3D
 			if _grab_point:
 				dest_transform = _grab_point.get_hand_transform(global_position)
 				_xr_collision_hand.finger_poses = _grab_point.finger_poses
@@ -238,45 +336,48 @@ func pickup_object(which : PhysicsBody3D):
 					_pick_input = pick_action
 					
 			else: # Just  dont pick it up
+				push_warning("XRT2Pickup: no grab point for %s (ignore_dist=%s)" % [which.name, ignore_grab_distance])
 				return
 			
-			# Orthonormalize + affine_inverse so any scaled grab/attachment
-			# basis cannot bake non-1 scale into the physics hand.
 			dest_transform.basis = dest_transform.basis.orthonormalized()
-			var attachment_xf : Transform3D = get_parent().global_transform
-			attachment_xf.basis = attachment_xf.basis.orthonormalized()
-			var offset : Transform3D = attachment_xf.affine_inverse() * hand_transform
-			offset.basis = offset.basis.orthonormalized()
+			var attachment := get_parent() as XRT2HandAttachment
+			if attachment:
+				attachment._on_skeleton_updated()
 
-			# Now move our hand in the correct grab position
-			_xr_collision_hand.global_transform = dest_transform * offset
-			_xr_collision_hand.scale = Vector3.ONE
-			_xr_collision_hand.force_update_transform()
+			var is_support := _is_secondary_support_grab(which, _grab_point)
+			if is_support:
+				_place_hand_at_grab_point(dest_transform)
+			else:
+				_place_object_at_hand_attachment(which)
 
-			# Now join our hand and the object we're picking up together
 			_joint = Generic6DOFJoint3D.new()
 			add_child(_joint, false, Node.INTERNAL_MODE_BACK)
 			_joint.node_a = _xr_collision_hand.get_path()
 			_joint.node_b = which.get_path()
 
-			if _xr_collision_hand._hand_mesh:
-				# Now position our hand mesh where our hand was
-				_xr_collision_hand._hand_mesh.global_transform = hand_transform
+			which.add_collision_exception_with(_xr_collision_hand)
 
-				# And tween our hand mesh,
-				# this should animate our hand moving to where we've grabbed it
-				# while at the same time we pull our grabbed object to where our
-				# hand is tracking 
-				if _tween:
-					_tween.kill()
-
-				_tween = _xr_collision_hand._hand_mesh.create_tween()
-
-				# Now tween
-				_tween.tween_property(_xr_collision_hand._hand_mesh, "transform", Transform3D(), 0.1)
-				
-				# Dont collide with collision hand that picked it up
-				which.add_collision_exception_with(_xr_collision_hand)
+			if is_support:
+				_begin_pickup_orient(which)
+				if _xr_collision_hand._hand_mesh:
+					# Foregrip only: brief mesh settle (rifle may shift).
+					_xr_collision_hand._hand_mesh.global_transform = hand_transform
+					if _tween:
+						_tween.kill()
+					_tween = _xr_collision_hand._hand_mesh.create_tween()
+					_tween.tween_property(
+						_xr_collision_hand._hand_mesh, "transform",
+						Transform3D(), PICKUP_ORIENT_TWEEN_DURATION
+					)
+					if not _tween.finished.is_connected(_on_pickup_orient_finished):
+						_tween.finished.connect(_on_pickup_orient_finished, CONNECT_ONE_SHOT)
+				else:
+					_on_pickup_orient_finished()
+			else:
+				if _xr_collision_hand._hand_mesh:
+					_xr_collision_hand._hand_mesh.transform = Transform3D()
+				_orienting_pickup = false
+				_glue_primary_after_pickup = true
 
 		else:
 			# TODO implement other types of grab
@@ -328,7 +429,7 @@ func pickup_object(which : PhysicsBody3D):
 			pass
 	
 	# No longer show highlighted
-	_remove_highlight(which)
+	_clear_highlight_for_closest(which, _grab_point)
 	
 	# Swap primary status to true if its not picked up by something else
 	if picked_up_by(which):
@@ -345,15 +446,32 @@ func pickup_object(which : PhysicsBody3D):
 
 	# Remember state
 	_picked_up = which
-	_original_collision_layer = _picked_up.collision_layer
-	_original_collision_mask = _picked_up.collision_mask
+	if _orient_collision_restore.has(which):
+		var layers : Vector2i = _orient_collision_restore[which]
+		_original_collision_layer = layers.x
+		_original_collision_mask = layers.y
+	else:
+		_original_collision_layer = _picked_up.collision_layer
+		_original_collision_mask = _picked_up.collision_mask
 
 	_picked_up.remove_from_group("dropped")
 	picked_up.emit(self, which)
 
+	if _glue_primary_after_pickup:
+		_glue_primary_after_pickup = false
+		if is_instance_valid(_grab_point) and is_instance_valid(_picked_up):
+			var attachment := get_parent() as XRT2HandAttachment
+			if attachment:
+				attachment._on_skeleton_updated()
+			_place_object_at_hand_attachment(_picked_up)
+		if _xr_collision_hand and _xr_collision_hand.has_method("begin_pickup_settle"):
+			_xr_collision_hand.begin_pickup_settle()
+
+
 ## Drop object we're currently holding
 func drop_held_object() -> void:
-	
+	_finish_pickup_orient()
+
 	# Get some info from our pose
 	var linear_velocity : Vector3 = Vector3()
 	var angular_velocity : Vector3 = Vector3()
@@ -402,6 +520,18 @@ func drop_held_object() -> void:
 
 			_xr_collision_hand._force_teleport_allowed = true
 
+			# Collision-hand path previously left velocity at the joint-settled
+			# near-zero — apply controller throw and clear leftover held damp.
+			if _picked_up is RigidBody3D:
+				var rb: RigidBody3D = _picked_up
+				rb.freeze = false
+				rb.linear_damp = 0.0
+				rb.angular_damp = 0.0
+				rb.linear_velocity = linear_velocity
+				rb.angular_velocity = angular_velocity
+				rb.gravity_scale = 1.0
+				rb.sleeping = false
+
 	elif _xr_controller:
 		_picked_up.collision_layer = _original_collision_layer
 		_picked_up.collision_mask = _original_collision_mask
@@ -423,6 +553,9 @@ func drop_held_object() -> void:
 	if other:
 		# If it isn't already primary, this is now our primary
 		other._is_primary = true
+	elif _xr_collision_hand:
+		_restore_held_environment_collision_mask()
+		_begin_drop_collision_grace(was_picked_up)
 	elif _xr_player_object:
 		was_picked_up.remove_collision_exception_with(_xr_player_object)
 		_xr_player_object.remove_collision_exception_with(was_picked_up)
@@ -439,7 +572,168 @@ func drop_held_object() -> void:
 	dropped.emit(self, was_picked_up, other == null)
 	
 func _re_enable_collision(body: Node3D) -> void:
+	if body is PhysicsBody3D and _drop_collision_grace.has(body):
+		return
 	body.remove_collision_exception_with(_xr_collision_hand)
+
+
+func _begin_drop_collision_grace(body: PhysicsBody3D) -> void:
+	if not is_instance_valid(body):
+		return
+	_drop_collision_grace[body] = DROP_COLLISION_GRACE_FRAMES
+
+
+func _process_drop_collision_grace() -> void:
+	if _drop_collision_grace.is_empty():
+		return
+
+	var finished: Array[PhysicsBody3D] = []
+	for body: PhysicsBody3D in _drop_collision_grace:
+		if not is_instance_valid(body) or body.is_in_group("snap_zone"):
+			finished.append(body)
+			continue
+		_drop_collision_grace[body] -= 1
+		if _drop_collision_grace[body] <= 0:
+			_end_drop_collision_grace(body)
+			finished.append(body)
+
+	for body in finished:
+		_drop_collision_grace.erase(body)
+
+
+func _end_drop_collision_grace(body: PhysicsBody3D) -> void:
+	if not is_instance_valid(body):
+		return
+	if is_instance_valid(_xr_collision_hand):
+		body.remove_collision_exception_with(_xr_collision_hand)
+	if is_instance_valid(_xr_player_object):
+		body.remove_collision_exception_with(_xr_player_object)
+		_xr_player_object.remove_collision_exception_with(body)
+
+
+func _apply_held_environment_collision_mask(root: PhysicsBody3D) -> void:
+	if not _xr_collision_hand:
+		return
+
+	var bodies: Array[RigidBody3D] = []
+	_collect_orient_bodies(root, bodies)
+
+	for body in bodies:
+		if not is_instance_valid(body):
+			continue
+		_held_environment_mask_restore[body] = body.collision_mask
+		body.collision_mask &= ~HELD_ENVIRONMENT_COLLISION_MASK
+
+
+func _restore_held_environment_collision_mask() -> void:
+	for body: RigidBody3D in _held_environment_mask_restore:
+		if is_instance_valid(body):
+			body.collision_mask = _held_environment_mask_restore[body]
+	_held_environment_mask_restore.clear()
+
+
+func _collect_orient_bodies(node: Node, bodies: Array[RigidBody3D]) -> void:
+	if node is RigidBody3D:
+		bodies.append(node)
+	for child in node.get_children():
+		_collect_orient_bodies(child, bodies)
+
+
+func _get_orient_collision_root(which: PhysicsBody3D) -> Node:
+	var root: Node = which
+	var node: Node = which.get_parent()
+	while node:
+		if node is RigidBody3D:
+			root = node
+		node = node.get_parent()
+	return root
+
+
+func _get_assembly_root(body: PhysicsBody3D) -> PhysicsBody3D:
+	return _get_orient_collision_root(body) as PhysicsBody3D
+
+
+## Move the physics hand so the metacarpal attachment sits on dest_transform.
+func _place_hand_at_grab_point(dest_transform: Transform3D) -> void:
+	if not _xr_collision_hand:
+		return
+	dest_transform.basis = dest_transform.basis.orthonormalized()
+	var attachment_local : Transform3D = get_parent().transform
+	attachment_local.basis = attachment_local.basis.orthonormalized()
+	_xr_collision_hand.global_transform = dest_transform * attachment_local.affine_inverse()
+	_xr_collision_hand.scale = Vector3.ONE
+	_xr_collision_hand.force_update_transform()
+
+
+## Seat the body so its grab-point hand pose matches the metacarpal attachment.
+func _place_object_at_hand_attachment(which: PhysicsBody3D) -> void:
+	if not is_instance_valid(_grab_point) or not is_instance_valid(which):
+		return
+	var attachment_xf : Transform3D = get_parent().global_transform
+	attachment_xf.basis = attachment_xf.basis.orthonormalized()
+	var grab_hand_xf : Transform3D = _grab_point.get_hand_transform(attachment_xf.origin)
+	grab_hand_xf.basis = grab_hand_xf.basis.orthonormalized()
+	var delta : Transform3D = attachment_xf * grab_hand_xf.affine_inverse()
+	which.global_transform = delta * which.global_transform
+	which.force_update_transform()
+	if which is RigidBody3D:
+		var rb := which as RigidBody3D
+		rb.linear_velocity = Vector3.ZERO
+		rb.angular_velocity = Vector3.ZERO
+		rb.reset_physics_interpolation()
+
+
+func _snap_hand_to_current_grab_point() -> void:
+	if not is_instance_valid(_grab_point) or not _xr_collision_hand:
+		return
+	var dest_transform := _grab_point.get_hand_transform(_xr_collision_hand.global_position)
+	_place_hand_at_grab_point(dest_transform)
+
+
+func _begin_pickup_orient(which: PhysicsBody3D) -> void:
+	_orient_collision_restore.clear()
+	var bodies: Array[RigidBody3D] = []
+	_collect_orient_bodies(_get_orient_collision_root(which), bodies)
+	for body in bodies:
+		if not is_instance_valid(body):
+			continue
+		_orient_collision_restore[body] = Vector2i(body.collision_layer, body.collision_mask)
+		body.collision_layer = 0
+		body.collision_mask = 0
+	_orienting_pickup = true
+
+
+func _finish_pickup_orient() -> void:
+	if not _orienting_pickup:
+		return
+	_orienting_pickup = false
+	for body in _orient_collision_restore:
+		if not is_instance_valid(body):
+			continue
+		var layers: Vector2i = _orient_collision_restore[body]
+		# GunSlide zeros its layer while the weapon is free so it can't shelf
+		# the gun midair. If we captured that free state during gun pickup,
+		# restoring 0 would leave the bolt ungrabbable — keep prior non-zero.
+		if layers.x == 0 and body.collision_layer != 0:
+			layers.x = body.collision_layer
+		if layers.y == 0 and body.collision_mask != 0:
+			layers.y = body.collision_mask
+		body.collision_layer = layers.x
+		body.collision_mask = layers.y
+	_orient_collision_restore.clear()
+	if is_instance_valid(_picked_up):
+		_apply_held_environment_collision_mask(_picked_up)
+
+
+func _on_pickup_orient_finished() -> void:
+	_finish_pickup_orient()
+	if not is_instance_valid(_picked_up) or not is_instance_valid(_grab_point):
+		return
+	# Foregrip only — primary already seated + glued at pickup time.
+	if _is_secondary_support_grab(_picked_up, _grab_point):
+		_snap_hand_to_current_grab_point()
+		if _xr_collision_hand and _xr_collision_hand.has_method("_clear_hand_mesh_grab_lock"):
+			_xr_collision_hand._clear_hand_mesh_grab_lock()
 				
 #endregion
 
@@ -569,6 +863,8 @@ func _process(_delta):
 	# Don't run in editor
 	if Engine.is_editor_hint():
 		return
+
+	_process_drop_collision_grace()
 	
 	# If we don't have a controller ancestor, nothing we can do
 	if not _xr_controller and not _xr_collision_hand:
@@ -652,33 +948,28 @@ func _process(_delta):
 				and _closest_object and is_instance_valid(_closest_object.body):
 			_is_grab = true
 			_pick_input = pick_action
-			try_pickup.emit(self, _closest_object.body)
+			_stage_pickup_attempt(_closest_object)
 			return
 	else:
-		# Empty-hand pickup: grip OR trigger press edge.
-		# Do not sticky-latch while holding nothing (that blocked later trigger pickups).
-		# Do not clear _is_grab after try_pickup — grab is networked and sticky
-		# items (keys) drop immediately if _is_grab is false when LocalGrab lands.
-		var grip_pressed_edge := grip_now and not _was_drop_pressed
+		# Empty-hand world pickup: trigger only, except bolt/slide reload grips on a
+		# weapon already held by the other hand — those also accept grip.
+		var was_grip_pressed := _was_drop_pressed
+		var grip_pressed_edge := grip_now and not was_grip_pressed
 		_was_drop_pressed = grip_now
 		_was_pick_pressed = pick_now
 
 		var want_pickup := false
-		if grip_pressed_edge:
-			_pick_input = grab_action
-			want_pickup = true
-		elif pick_pressed_edge:
+		if pick_pressed_edge:
 			_pick_input = pick_action
 			want_pickup = true
-
-		if InputMap.has_action(grab_action) and Input.is_action_just_pressed(grab_action):
+		elif grip_pressed_edge and can_grip_pickup_reload():
 			_pick_input = grab_action
 			want_pickup = true
 
 		if want_pickup and not _block_grab_until_release \
 				and _closest_object and is_instance_valid(_closest_object.body):
 			_is_grab = true
-			try_pickup.emit(self, _closest_object.body)
+			_stage_pickup_attempt(_closest_object)
 			return
 
 		# No object this press: forget intent so a later trigger can still pick up.
@@ -688,6 +979,8 @@ func _process(_delta):
 	# Closest is already refreshed when empty-handed; only refresh here while holding
 	# (highlights are suppressed while holding anyway).
 	if _picked_up:
+		if _grab_point and _uses_local_grab_highlight(_picked_up, _grab_point):
+			_remove_highlight(_grab_point)
 		return
 
 	# Highlight pass for empty hand (closest already updated above).
@@ -695,24 +988,147 @@ func _process(_delta):
 #endregion
 
 
+func _stage_pickup_attempt(closest: ClosestObject) -> void:
+	if closest and closest.grab_point and is_instance_valid(closest.body):
+		var root := _get_assembly_root(closest.body)
+		if not _grab_point_allowed_while_unheld(root, closest.grab_point):
+			return
+	_pending_pickup_grab_point = closest.grab_point if closest else null
+	if _pick_input == pick_action and closest and is_instance_valid(closest.body) \
+			and closest.grab_point and closest.grab_point.useable:
+		pick_trigger_engaged.emit(self, closest.body)
+	try_pickup.emit(self, closest.body)
+
+
+func _consume_pending_grab_point(which: PhysicsBody3D) -> XRT2GrabPoint:
+	var grab_point := _pending_pickup_grab_point
+	_pending_pickup_grab_point = null
+	if grab_point == null or not is_instance_valid(grab_point):
+		return null
+	var grab_body := grab_point.get_parent() as PhysicsBody3D
+	if grab_body == null:
+		return null
+	if grab_body == which:
+		return grab_point
+	if _get_assembly_root(grab_body) == _get_assembly_root(which):
+		return grab_point
+	return null
+
+
+## Another hand already holds a primary/useable grip on this weapon assembly.
+func _other_hand_holds_primary_on_assembly(assembly_root: PhysicsBody3D) -> bool:
+	return _other_hand_primary_grab_point(assembly_root) != null
+
+
+## Primary/useable grab point held by the other hand on this assembly, if any.
+func _other_hand_primary_grab_point(assembly_root: PhysicsBody3D) -> XRT2GrabPoint:
+	if assembly_root == null:
+		return null
+	for pickup: XRT2Pickup in _pickup_handlers:
+		if pickup == self or not is_instance_valid(pickup._picked_up):
+			continue
+		if _get_assembly_root(pickup._picked_up) != assembly_root:
+			continue
+		var gp := pickup.get_picked_up_grab_point()
+		if gp and gp.useable:
+			return gp
+	return null
+
+
+func _is_assembly_held(assembly_root: PhysicsBody3D) -> bool:
+	if assembly_root == null:
+		return false
+	for pickup: XRT2Pickup in _pickup_handlers:
+		if not is_instance_valid(pickup._picked_up):
+			continue
+		if _get_assembly_root(pickup._picked_up) == assembly_root:
+			return true
+	return false
+
+
+func _assembly_has_useable_grab_point(assembly_root: PhysicsBody3D) -> bool:
+	var grab_points: Array[XRT2GrabPoint] = []
+	_collect_grab_points(assembly_root, grab_points)
+	for grab_point in grab_points:
+		if grab_point.useable:
+			return true
+	return false
+
+
+## Multi-grip weapons (Gleagle/rifle):
+## - Unheld / holstered: only primary (useable) grips
+## - Held on left primary: only right-hand Alt/support
+## - Held on right primary: only left-hand Alt/support
+## Simple pickables (no useable grips) keep all points.
+func _grab_point_allowed_while_unheld(
+	assembly_root: PhysicsBody3D, grab_point: XRT2GrabPoint
+) -> bool:
+	return _grab_point_allowed_for_pickup(assembly_root, grab_point)
+
+
+func _grab_point_allowed_for_pickup(
+	assembly_root: PhysicsBody3D, grab_point: XRT2GrabPoint
+) -> bool:
+	if grab_point == null:
+		return true
+	if not _assembly_has_useable_grab_point(assembly_root):
+		return true
+
+	var other_primary := _other_hand_primary_grab_point(assembly_root)
+
+	if grab_point.useable:
+		# Primaries only while nobody holds a primary (world + holster draws).
+		return other_primary == null
+
+	# Bolt/slide reload: only once the weapon is already held.
+	if grab_point.exclusive:
+		return _is_assembly_held(assembly_root)
+
+	# Secondary brace: only the opposite-hand support after a primary grab.
+	return _is_opposite_secondary_for_primary(other_primary, grab_point)
+
+
+## Left primary → right-hand Alt; right primary → left-hand Alt.
+func _is_opposite_secondary_for_primary(
+	primary_gp: XRT2GrabPoint, secondary_gp: XRT2GrabPoint
+) -> bool:
+	if primary_gp == null or secondary_gp == null:
+		return false
+	if secondary_gp.useable or secondary_gp.exclusive:
+		return false
+
+	var primary_left_only := primary_gp.left_hand and not primary_gp.right_hand
+	var primary_right_only := primary_gp.right_hand and not primary_gp.left_hand
+	var secondary_left_only := secondary_gp.left_hand and not secondary_gp.right_hand
+	var secondary_right_only := secondary_gp.right_hand and not secondary_gp.left_hand
+
+	if primary_left_only:
+		return secondary_right_only
+	if primary_right_only:
+		return secondary_left_only
+	return false
+
+
 func _update_closest_object() -> void:
 	var was_closest_object : ClosestObject = _closest_object
 	_closest_object = _get_closest()
 
-	if was_closest_object and _closest_object and was_closest_object.body == _closest_object.body:
+	if was_closest_object and _closest_object \
+			and was_closest_object.body == _closest_object.body \
+			and was_closest_object.grab_point == _closest_object.grab_point:
 		return
 
 	if was_closest_object and is_instance_valid(was_closest_object.body):
-		_remove_highlight(was_closest_object.body)
+		_clear_highlight_for_closest(
+			was_closest_object.body, was_closest_object.grab_point
+		)
 
 	if _closest_object and is_instance_valid(_closest_object.body):
-		if _closest_object.grab_point and _closest_object.grab_point.highlight_mode == 2:
+		if _closest_object.grab_point \
+				and _should_skip_grab_point_highlight(_closest_object.grab_point):
 			return
 
-		if _closest_object.grab_point and _closest_object.grab_point.highlight_mode == 1 and picked_up_by(_closest_object.body):
-			return
-
-		_add_highlight(_closest_object.body)
+		_apply_highlight_for_closest(_closest_object)
 
 
 #region Private functions
@@ -736,75 +1152,203 @@ func _get_hand_collision_rids() -> Array[RID]:
 
 
 func _body_has_useable_grab_point(body : PhysicsBody3D) -> bool:
-	for child in body.get_children():
-		if child is XRT2GrabPoint and child.enabled and child.useable:
+	var grab_points: Array[XRT2GrabPoint] = []
+	_collect_grab_points(body, grab_points)
+	for grab_point in grab_points:
+		if grab_point.useable:
 			return true
 	return false
 
 
+func _collect_grab_points(node: Node, grab_points: Array[XRT2GrabPoint], depth: int = 0) -> void:
+	for child in node.get_children():
+		if child is XRT2GrabPoint and child.enabled:
+			grab_points.append(child)
+		elif depth < 2 and child is RigidBody3D:
+			_collect_grab_points(child, grab_points, depth + 1)
+
+
 ## Non-useable grab on an object that also has primary/useable grips (gun front grip, etc.).
+## Exclusive grips (bolt/slide reload) are excluded — they use full detection radius.
 func _is_secondary_support_grab(body : PhysicsBody3D, grab_point : XRT2GrabPoint) -> bool:
 	if body == null or grab_point == null or grab_point.useable:
 		return false
-	return _body_has_useable_grab_point(body)
+	if grab_point.exclusive:
+		return false
+	return _body_has_useable_grab_point(_get_assembly_root(body))
 
 
-func _get_closest_grabpoint(body : PhysicsBody3D, hand_position : Vector3) -> XRT2GrabPoint:
-	# Check any applicable grab point on the body first
+func _get_grab_point_max_distance(body : PhysicsBody3D, grab_point : XRT2GrabPoint) -> float:
+	if _is_secondary_support_grab(body, grab_point):
+		return secondary_grab_distance
+	return detection_radius
+
+
+## Bolt/slide reload grip on a weapon already held by another hand.
+func _is_reload_grip(body : PhysicsBody3D, grab_point : XRT2GrabPoint) -> bool:
+	if body == null or grab_point == null:
+		return false
+	if not grab_point.exclusive or grab_point.useable:
+		return false
+	var root := _get_assembly_root(body)
+	if root == null or not _body_has_useable_grab_point(root):
+		return false
+	# Other hand must already be holding this weapon assembly.
+	var holder := picked_up_by(root)
+	if holder == null:
+		holder = picked_up_by(body)
+	return holder != null and holder != self
+
+
+## Used by HandComponent so loadout grip does not steal bolt/slide reload.
+func can_grip_pickup_reload() -> bool:
+	if _picked_up or _block_grab_until_release:
+		return false
+	if not _closest_object or not is_instance_valid(_closest_object.body):
+		_update_closest_object()
+	if not _closest_object or not is_instance_valid(_closest_object.body):
+		return false
+	return _is_reload_grip(_closest_object.body, _closest_object.grab_point)
+
+
+## True when the pending (or current) grab point is a primary/useable grip.
+## Defaults false — secondary/bolt must never be treated as fireable mid-grab.
+func is_pending_grab_useable() -> bool:
+	if _pending_pickup_grab_point and is_instance_valid(_pending_pickup_grab_point):
+		return _pending_pickup_grab_point.useable
+	if _grab_point and is_instance_valid(_grab_point):
+		return _grab_point.useable
+	if _closest_object and is_instance_valid(_closest_object.grab_point):
+		return _closest_object.grab_point.useable
+	return false
+
+
+## True while holding a non-primary foregrip-style brace (not pistol/walkie grips).
+func is_secondary_support_hold() -> bool:
+	if not _picked_up or not _grab_point:
+		return false
+	return _is_secondary_support_grab(_picked_up, _grab_point)
+
+
+## Foregrip or bolt/slide grips: highlight only meshes near the grab point.
+func _uses_local_grab_highlight(
+	body: PhysicsBody3D, grab_point: XRT2GrabPoint
+) -> bool:
+	if grab_point == null:
+		return false
+	if _is_secondary_support_grab(body, grab_point):
+		return true
+	if grab_point.useable or not grab_point.exclusive:
+		return false
+	return _body_has_useable_grab_point(_get_assembly_root(body))
+
+
+func _should_skip_grab_point_highlight(grab_point: XRT2GrabPoint) -> bool:
+	if grab_point == null:
+		return false
+	if grab_point.highlight_mode == 2:
+		return true
+	if grab_point.highlight_mode != 1:
+		return false
+	if grab_point._occupied:
+		return true
+	var parent := grab_point.get_parent()
+	if parent is RigidBody3D:
+		return picked_up_by(parent) != null
+	return false
+
+
+func _get_highlight_target(closest : ClosestObject) -> Node3D:
+	return _get_highlight_key(closest.body, closest.grab_point)
+
+
+func _get_highlight_key(
+	body: PhysicsBody3D, grab_point: XRT2GrabPoint
+) -> Node3D:
+	if grab_point and _uses_local_grab_highlight(body, grab_point):
+		return grab_point
+	return body
+
+
+func _apply_highlight_for_closest(closest: ClosestObject) -> void:
+	if closest.grab_point and _uses_local_grab_highlight(closest.body, closest.grab_point):
+		_add_near_grab_point_highlight(
+			_get_assembly_root(closest.body), closest.grab_point
+		)
+	else:
+		_add_highlight(closest.body)
+
+
+func _clear_highlight_for_closest(
+	body: PhysicsBody3D, grab_point: XRT2GrabPoint
+) -> void:
+	if grab_point and _uses_local_grab_highlight(body, grab_point):
+		_remove_highlight(grab_point)
+	_remove_highlight(body)
+
+
+func _get_closest_grabpoint(body : PhysicsBody3D, hand_position : Vector3, ignore_max_distance : bool = false) -> XRT2GrabPoint:
 	var is_left_hand : bool = _is_left_hand()
 	var closest_grab_point : XRT2GrabPoint = null
 	var closest_dist : float = 9999.99
-	
-	var has_useable : bool = false # Do we have any useable grab points
-	var primary_left_occupied : bool = false
-	var primary_right_occupied : bool = false
-	
-	## Check if we have grab point primaries and if they have been grabbed already
-	for child in body.get_children():
-		if child is XRT2GrabPoint and child.enabled:
-			var grab_point : XRT2GrabPoint = child
-			if grab_point.useable:
-				has_useable = true
-				if grab_point._occupied:
-					if grab_point.left_hand:
-						primary_left_occupied = true
-					else:
-						primary_right_occupied = true
-			
-	for child in body.get_children():
-		if child is XRT2GrabPoint and child.enabled:
-			var grab_point : XRT2GrabPoint = child
-				
-			if is_left_hand: # SKIP GRAB POINT IF:
-				if not grab_point.left_hand: # Not for correct hand
-					continue
-				if grab_point._occupied: # Its not occupied
-					continue
-				if has_useable:
-					if grab_point.useable: # Its a primary grab point 
-						if primary_right_occupied: # Its alternative primary is occupied
-							continue
-					else:
-						if not primary_right_occupied:
-							continue
 
-			else:
-				if not grab_point.right_hand:
-					continue
-				if grab_point._occupied:
-					continue
-				if has_useable:
-					if grab_point.useable:
-						if primary_left_occupied:
-							continue
-					else:
-						if not primary_left_occupied:
-							continue
+	var assembly_root := _get_assembly_root(body)
+	var grab_points: Array[XRT2GrabPoint] = []
+	_collect_grab_points(assembly_root, grab_points)
 
-			var dist = (grab_point.get_hand_transform(hand_position).origin - hand_position).length_squared()
-			if dist < closest_dist:
-				closest_grab_point = grab_point
-				closest_dist = dist
+	for grab_point in grab_points:
+		if not _grab_point_allowed_for_pickup(assembly_root, grab_point):
+			continue
+		if is_left_hand:
+			if not grab_point.left_hand:
+				continue
+		else:
+			if not grab_point.right_hand:
+				continue
+		if grab_point._occupied:
+			continue
+
+		var dist = (grab_point.get_hand_transform(hand_position).origin - hand_position).length_squared()
+		var max_dist := _get_grab_point_max_distance(assembly_root, grab_point)
+		if not ignore_max_distance and dist > max_dist * max_dist:
+			continue
+		if dist < closest_dist:
+			closest_grab_point = grab_point
+			closest_dist = dist
+	return closest_grab_point
+
+
+func _find_secondary_support_grabpoint(
+	assembly_root: PhysicsBody3D, hand_position: Vector3
+) -> XRT2GrabPoint:
+	var other_primary := _other_hand_primary_grab_point(assembly_root)
+	if other_primary == null:
+		return null
+
+	var is_left_hand := _is_left_hand()
+	var grab_points: Array[XRT2GrabPoint] = []
+	_collect_grab_points(assembly_root, grab_points)
+
+	var closest_grab_point: XRT2GrabPoint = null
+	var closest_dist := 9999.99
+	for grab_point in grab_points:
+		if not _is_opposite_secondary_for_primary(other_primary, grab_point):
+			continue
+		if is_left_hand and not grab_point.left_hand:
+			continue
+		if not is_left_hand and not grab_point.right_hand:
+			continue
+		if grab_point._occupied:
+			continue
+
+		var dist := (grab_point.get_hand_transform(hand_position).origin \
+				- hand_position).length_squared()
+		var max_dist := _get_grab_point_max_distance(assembly_root, grab_point)
+		if dist > max_dist * max_dist:
+			continue
+		if dist < closest_dist:
+			closest_grab_point = grab_point
+			closest_dist = dist
 	return closest_grab_point
 
 
@@ -858,6 +1402,12 @@ func _get_closest() -> ClosestObject:
 			# Always include rigidbodies unless frozen
 			# TODO see if we can treat frozen bodies like grabing a static body
 			pass
+		elif body is RigidBody3D and body.freeze:
+			# Seated bolt/slide on a held gun is frozen kinematic so it cannot
+			# underdamp the hand joint — still allow the other hand to grab it.
+			var assembly_holder := _get_holder_pickup(body)
+			if assembly_holder == null or assembly_holder == self:
+				continue
 		elif body is PhysicalBone3D and _xr_collision_hand:
 			# We support picking up PhysicalBone3D if we're using collision hands
 			pass
@@ -869,9 +1419,9 @@ func _get_closest() -> ClosestObject:
 			# Skip anything else
 			continue
 
-		var by : XRT2Pickup = picked_up_by(body)
-		if by:
-			# Check if it's already been picked up by an exclusive grab
+		var by : XRT2Pickup = _get_holder_pickup(body)
+		if by and by._picked_up == body:
+			# Check if it's already been picked up by an exclusive grab on this body.
 			var on_grab_point = by.get_picked_up_grab_point()
 			if on_grab_point and on_grab_point.exclusive:
 				# Can't pick this up
@@ -879,13 +1429,53 @@ func _get_closest() -> ClosestObject:
 
 		# Do we have a grab point?
 		var new_dist : float = 9999999.99
-		var grab_point = _get_closest_grabpoint(body, global_position)
+		var assembly_root_for_body := _get_assembly_root(body as PhysicsBody3D)
+		var grab_point = null
+		# While the other hand holds a primary grip, prefer brace/foregrip points.
+		if _other_hand_holds_primary_on_assembly(assembly_root_for_body):
+			grab_point = _find_secondary_support_grabpoint(
+				assembly_root_for_body, global_position
+			)
+		if not grab_point:
+			grab_point = _get_closest_grabpoint(body, global_position)
+		var target_body : PhysicsBody3D = body
 		if grab_point:
-			if by and grab_point.exclusive:
-				# Two handed not possible
+			# Bolt/slide grips live on a child RigidBody. Assembly search can
+			# return them while overlapping the parent gun — pick up the child.
+			var grab_body := grab_point.get_parent() as PhysicsBody3D
+			if grab_body:
+				target_body = grab_body
+
+			var assembly_root := _get_assembly_root(target_body)
+			if not _grab_point_allowed_while_unheld(assembly_root, grab_point):
+				continue
+
+			# Exclusive: block a second grab of the *same* body, not a child bolt.
+			if by and grab_point.exclusive and by._picked_up == target_body:
 				continue
 
 			new_dist = (global_position - grab_point.get_hand_transform(global_position).origin).length_squared()
+
+			# When bracing, prefer the foregrip over a nearby bolt grab unless the
+			# bolt point is clearly closer.
+			var other_hand_holds_primary := _other_hand_holds_primary_on_assembly(assembly_root)
+			if _is_reload_grip(target_body, grab_point) \
+					and other_hand_holds_primary:
+				var support_gp := _find_secondary_support_grabpoint(
+					assembly_root, global_position
+				)
+				if support_gp:
+					var support_dist := (global_position \
+							- support_gp.get_hand_transform(global_position).origin) \
+							.length_squared()
+					if support_dist <= new_dist * 1.35:
+						grab_point = support_gp
+						new_dist = support_dist
+						if support_gp.get_parent() is PhysicsBody3D:
+							target_body = support_gp.get_parent()
+		elif by:
+			# Held by another hand — require an in-range support grip, not body center.
+			continue
 		else:
 			# TODO should do our raycast to see if there is nothing between us and the object we're picking up
 			
@@ -894,7 +1484,7 @@ func _get_closest() -> ClosestObject:
 		# See if this is our closest object
 		if new_dist < closest_dist:
 			closest = ClosestObject.new()
-			closest.body = body
+			closest.body = target_body
 			closest.grab_point = grab_point
 			closest_dist = new_dist
 
@@ -927,6 +1517,54 @@ func _highlight_meshes(node : Node3D) -> Dictionary[MeshInstance3D, Material]:
 				ret.merge(dic)
 
 	return ret
+
+
+func _highlight_meshes_near_point(
+	root: Node3D, point: Vector3, radius: float
+) -> Dictionary[MeshInstance3D, Material]:
+	var ret: Dictionary[MeshInstance3D, Material] = {}
+	_collect_meshes_near_point(root, point, radius, ret)
+	return ret
+
+
+func _collect_meshes_near_point(
+	node: Node, point: Vector3, radius: float, ret: Dictionary[MeshInstance3D, Material]
+) -> void:
+	if node.is_in_group("xrt2_no_highlight"):
+		return
+	if node is MeshInstance3D:
+		var mesh_instance: MeshInstance3D = node
+		if mesh_instance.visible \
+				and mesh_instance.global_position.distance_to(point) <= radius:
+			ret[mesh_instance] = mesh_instance.material_overlay
+			mesh_instance.material_overlay = _highlight_material
+	for child in node.get_children():
+		_collect_meshes_near_point(child, point, radius, ret)
+
+
+func _add_near_grab_point_highlight(
+	assembly_root: Node3D, grab_point: XRT2GrabPoint
+) -> void:
+	if _highlighted_bodies.has(grab_point):
+		if not _highlighted_bodies[grab_point].pickups.has(self):
+			_highlighted_bodies[grab_point].pickups.push_back(self)
+		return
+
+	var search_root: Node3D = assembly_root
+	var radius: float = secondary_highlight_radius
+	if grab_point.exclusive:
+		var parent := grab_point.get_parent()
+		if parent is Node3D:
+			search_root = parent
+		# Bolt meshes can sit slightly farther from the grab-point node origin.
+		radius = maxf(secondary_highlight_radius, 0.14)
+
+	var highlight: HighlightedBody = HighlightedBody.new()
+	highlight.original_materials = _highlight_meshes_near_point(
+		search_root, grab_point.global_position, radius
+	)
+	highlight.pickups.push_back(self)
+	_highlighted_bodies[grab_point] = highlight
 
 
 # Add highlight to this object.
