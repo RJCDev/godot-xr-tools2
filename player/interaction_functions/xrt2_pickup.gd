@@ -317,11 +317,52 @@ func _rebuild_held_joint(which: PhysicsBody3D) -> void:
 	_joint = Generic6DOFJoint3D.new()
 	add_child(_joint, false, Node.INTERNAL_MODE_BACK)
 	_joint.node_a = _xr_collision_hand.get_path()
-	_joint.node_b = which.get_path()
+
+	var joint_target: PhysicsBody3D = which
+	var brace_to_weapon := false
+	# Only real gun forend/bolt grips (assembly has a useable primary). Keys inherit
+	# exclusive=true from Pickable.tscn — must not get the soft forend spring.
+	if _is_weapon_reload_grip(which, _grab_point):
+		var root := _get_assembly_root(which)
+		# Shotgun forend (no Alt brace): spring to the gun body for aim.
+		# Rifle bolt (has Alt brace): stay on the slide carrier.
+		if root is PhysicsBody3D and root != which \
+				and not _assembly_has_secondary_brace(root as PhysicsBody3D):
+			joint_target = root as PhysicsBody3D
+			brace_to_weapon = true
+
+	_joint.node_b = joint_target.get_path()
 	# Default 6DOF locks linear+angular axes. That overconstrains a hinged door
 	# (panel cannot swing) so configure a soft positional spring instead.
 	if _is_hinged_body(which):
 		_configure_hinged_grab_joint(_joint)
+	elif brace_to_weapon:
+		# Soft forend spring: lateral aim moves the gun; along-rail stretch allows pump.
+		_configure_reload_forend_joint(_joint)
+	elif _is_weapon_reload_grip(which, _grab_point):
+		# Rifle/bolt on the slide body: soft spring so the palm can travel the rail.
+		_configure_reload_forend_joint(_joint)
+
+
+## Exclusive slide/bolt on a multi-grip gun (not keys/simple pickables).
+func _is_weapon_reload_grip(body: PhysicsBody3D, grab_point: XRT2GrabPoint) -> bool:
+	if body == null or grab_point == null:
+		return false
+	if not grab_point.exclusive or grab_point.useable:
+		return false
+	return _body_has_useable_grab_point(_get_assembly_root(body))
+
+
+## True when this weapon already has a dedicated foregrip/brace (non-exclusive support).
+func _assembly_has_secondary_brace(assembly_root: PhysicsBody3D) -> bool:
+	if assembly_root == null:
+		return false
+	var grab_points: Array[XRT2GrabPoint] = []
+	_collect_grab_points(assembly_root, grab_points)
+	for grab_point in grab_points:
+		if grab_point and not grab_point.useable and not grab_point.exclusive:
+			return true
+	return false
 
 
 ## Soft positional spring only — free rotation so the door hinge can swing.
@@ -330,6 +371,43 @@ func _configure_hinged_grab_joint(joint: Generic6DOFJoint3D) -> void:
 		return
 	const stiffness := 320.0
 	const damping := 28.0
+	for axis in [
+		Generic6DOFJoint3D.FLAG_ENABLE_LINEAR_LIMIT,
+		Generic6DOFJoint3D.FLAG_ENABLE_ANGULAR_LIMIT,
+		Generic6DOFJoint3D.FLAG_ENABLE_ANGULAR_SPRING,
+		Generic6DOFJoint3D.FLAG_ENABLE_MOTOR,
+		Generic6DOFJoint3D.FLAG_ENABLE_LINEAR_MOTOR,
+	]:
+		joint.set_flag_x(axis, false)
+		joint.set_flag_y(axis, false)
+		joint.set_flag_z(axis, false)
+	joint.set_flag_x(Generic6DOFJoint3D.FLAG_ENABLE_LINEAR_SPRING, true)
+	joint.set_flag_y(Generic6DOFJoint3D.FLAG_ENABLE_LINEAR_SPRING, true)
+	joint.set_flag_z(Generic6DOFJoint3D.FLAG_ENABLE_LINEAR_SPRING, true)
+	for param_stiff in [
+		Generic6DOFJoint3D.PARAM_LINEAR_SPRING_STIFFNESS,
+	]:
+		joint.set_param_x(param_stiff, stiffness)
+		joint.set_param_y(param_stiff, stiffness)
+		joint.set_param_z(param_stiff, stiffness)
+	for param_damp in [
+		Generic6DOFJoint3D.PARAM_LINEAR_SPRING_DAMPING,
+	]:
+		joint.set_param_x(param_damp, damping)
+		joint.set_param_y(param_damp, damping)
+		joint.set_param_z(param_damp, damping)
+	joint.set_param_x(Generic6DOFJoint3D.PARAM_LINEAR_SPRING_EQUILIBRIUM_POINT, 0.0)
+	joint.set_param_y(Generic6DOFJoint3D.PARAM_LINEAR_SPRING_EQUILIBRIUM_POINT, 0.0)
+	joint.set_param_z(Generic6DOFJoint3D.PARAM_LINEAR_SPRING_EQUILIBRIUM_POINT, 0.0)
+
+
+## Soft forend spring for bolt/slide hands jointed to the weapon body.
+func _configure_reload_forend_joint(joint: Generic6DOFJoint3D) -> void:
+	if joint == null:
+		return
+	# Strong enough to aim the barrel; soft enough that along-rail pump isn't locked.
+	const stiffness := 280.0
+	const damping := 24.0
 	for axis in [
 		Generic6DOFJoint3D.FLAG_ENABLE_LINEAR_LIMIT,
 		Generic6DOFJoint3D.FLAG_ENABLE_ANGULAR_LIMIT,
@@ -414,14 +492,24 @@ func _pickup_object_internal(which : PhysicsBody3D, ignore_grab_distance : bool)
 			elif is_hand_to_object:
 				# Bolt/slide: seat with authored palm (same offset primaries use).
 				# Brace/foregrip keeps prior live-attachment seating — do not regress it.
-				var is_exclusive_reload := _grab_point.exclusive and not _grab_point.useable
-				_place_hand_at_grab_point(dest_transform, is_exclusive_reload)
+				# Keys inherit exclusive from Pickable.tscn — only real weapon reloads.
+				_place_hand_at_grab_point(
+					dest_transform,
+					_is_weapon_reload_grip(which, _grab_point)
+				)
 			else:
 				_place_object_at_hand_attachment(which)
 
 			_rebuild_held_joint(which)
 
 			which.add_collision_exception_with(_xr_collision_hand)
+			# Shotgun forend springs to the gun body — keep the palm from colliding with it.
+			if _is_weapon_reload_grip(which, _grab_point):
+				var root := _get_assembly_root(which)
+				if root is PhysicsBody3D and root != which \
+						and not _assembly_has_secondary_brace(root as PhysicsBody3D):
+					(root as PhysicsBody3D).add_collision_exception_with(_xr_collision_hand)
+					_xr_collision_hand.add_collision_exception_with(root)
 
 			if is_hinged:
 				if _xr_collision_hand._hand_mesh:
@@ -539,11 +627,9 @@ func _pickup_object_internal(which : PhysicsBody3D, ignore_grab_distance : bool)
 				and _xr_collision_hand.has_method("begin_hinged_hand_mesh_lock"):
 			# Doors: mesh root sits exactly on the handle grab.
 			_xr_collision_hand.begin_hinged_hand_mesh_lock()
-		elif is_instance_valid(_grab_point) \
-				and _grab_point.exclusive and not _grab_point.useable \
+		elif _is_weapon_reload_grip(which, _grab_point) \
 				and _xr_collision_hand.has_method("begin_reload_grab_mesh_lock"):
-			# Bolt/slide: capture mesh↔grab offset like brace (metacarpal-correct).
-			# Do NOT use hinged identity lock — that puts the mesh root on the grab.
+			# Bolt/slide only — not keys (they inherit exclusive from Pickable.tscn).
 			_xr_collision_hand.begin_reload_grab_mesh_lock()
 
 	if _glue_primary_after_pickup:
@@ -611,25 +697,41 @@ func drop_held_object() -> void:
 
 			# Collision-hand path previously left velocity at the joint-settled
 			# near-zero — apply controller throw and clear leftover held damp.
+			# Already stashed by a snap zone (door key, holster): do not unfreeze
+			# or restore throw — NetworkedSnapZone drops the hand after snap.
 			if _picked_up is RigidBody3D:
 				var rb: RigidBody3D = _picked_up
-				rb.freeze = false
-				rb.linear_damp = 0.0
-				rb.angular_damp = 0.0
-				rb.linear_velocity = linear_velocity
-				rb.angular_velocity = angular_velocity
-				rb.gravity_scale = 1.0
-				rb.sleeping = false
+				if _is_stashed_in_snap_zone(rb):
+					pass
+				elif _is_hinged_body(rb):
+					# Soft-spring already drove the panel. Controller throw is in
+					# tracker space and often fights / inverts hinge swing on release.
+					rb.freeze = false
+					rb.linear_damp = 0.0
+					rb.angular_damp = 0.0
+					rb.sleeping = false
+				else:
+					rb.freeze = false
+					rb.linear_damp = 0.0
+					rb.angular_damp = 0.0
+					rb.linear_velocity = linear_velocity
+					rb.angular_velocity = angular_velocity
+					rb.gravity_scale = 1.0
+					rb.sleeping = false
 
 	elif _xr_controller:
 		_picked_up.collision_layer = _original_collision_layer
 		_picked_up.collision_mask = _original_collision_mask
 
-		if _picked_up is RigidBody3D:
-			_picked_up.freeze_mode = _original_freeze_mode
-			_picked_up.freeze = false
-			_picked_up.linear_velocity = linear_velocity
-			_picked_up.angular_velocity = angular_velocity
+		if _picked_up is RigidBody3D and not _is_stashed_in_snap_zone(_picked_up):
+			if _is_hinged_body(_picked_up):
+				_picked_up.freeze_mode = _original_freeze_mode
+				_picked_up.freeze = false
+			else:
+				_picked_up.freeze_mode = _original_freeze_mode
+				_picked_up.freeze = false
+				_picked_up.linear_velocity = linear_velocity
+				_picked_up.angular_velocity = angular_velocity
 	
 	# And we're no longer holding something
 	_picked_up = null
@@ -648,9 +750,13 @@ func drop_held_object() -> void:
 		# can restore world collision (otherwise the gun falls through floors).
 		_transfer_held_environment_collision_mask(other)
 	elif _xr_collision_hand:
-		_restore_held_environment_collision_mask()
-		_restore_dropped_body_collision(was_picked_up)
-		_begin_drop_collision_grace(was_picked_up)
+		# Snapped items keep snap-zone collision/freeze — don't restore pickup layers.
+		if not _is_stashed_in_snap_zone(was_picked_up):
+			_restore_held_environment_collision_mask()
+			_restore_dropped_body_collision(was_picked_up)
+			_begin_drop_collision_grace(was_picked_up)
+		else:
+			_held_environment_mask_restore.clear()
 	elif _xr_player_object:
 		was_picked_up.remove_collision_exception_with(_xr_player_object)
 		_xr_player_object.remove_collision_exception_with(was_picked_up)
@@ -1320,6 +1426,23 @@ func is_hinged_hold() -> bool:
 	return is_instance_valid(_picked_up) and _is_hinged_body(_picked_up)
 
 
+## Key/holster stash: collision off + kinematic freeze. body_exited may strip the
+## snap_zone group early, so also detect the stash physics state.
+func _is_stashed_in_snap_zone(body: PhysicsBody3D) -> bool:
+	if body == null or not is_instance_valid(body):
+		return false
+	if body.is_in_group("snap_zone"):
+		return true
+	if body is RigidBody3D:
+		var rb := body as RigidBody3D
+		if rb.freeze \
+				and rb.freeze_mode == RigidBody3D.FREEZE_MODE_KINEMATIC \
+				and rb.collision_layer == 0 \
+				and is_equal_approx(rb.gravity_scale, 0.0):
+			return true
+	return false
+
+
 ## True when an empty-hand proximity target is available (doors, props, etc.).
 ## Loadout draw must not steal grip when this is true.
 func has_closest_pickup() -> bool:
@@ -1415,13 +1538,10 @@ func is_secondary_support_hold() -> bool:
 
 
 ## True while holding an exclusive bolt/slide reload grip.
-## Does not require the other hand still holding — once on the slide, keep mesh glue.
 func is_reload_grip_hold() -> bool:
 	if not _picked_up or not _grab_point:
 		return false
-	if not _grab_point.exclusive or _grab_point.useable:
-		return false
-	return _body_has_useable_grab_point(_get_assembly_root(_picked_up))
+	return _is_weapon_reload_grip(_picked_up, _grab_point)
 
 
 ## Foregrip or bolt/slide grips: highlight only meshes near the grab point.
@@ -1573,6 +1693,43 @@ func _find_secondary_support_grabpoint(
 	return closest_grab_point
 
 
+## Exclusive bolt/slide forend on a weapon already held by the other hand.
+func _find_reload_grabpoint(
+	assembly_root: PhysicsBody3D, hand_position: Vector3
+) -> XRT2GrabPoint:
+	if assembly_root == null or not _is_assembly_held(assembly_root):
+		return null
+
+	var is_left_hand := _is_left_hand()
+	var grab_points: Array[XRT2GrabPoint] = []
+	_collect_grab_points(assembly_root, grab_points)
+
+	var closest_grab_point: XRT2GrabPoint = null
+	var closest_dist := 9999.99
+	for grab_point in grab_points:
+		if grab_point == null or not grab_point.exclusive or grab_point.useable:
+			continue
+		if is_left_hand and not grab_point.left_hand:
+			continue
+		if not is_left_hand and not grab_point.right_hand:
+			continue
+		if grab_point._occupied:
+			continue
+		if not _grab_point_allowed_for_pickup(assembly_root, grab_point):
+			continue
+
+		var dist := (grab_point.get_detection_origin() - hand_position).length_squared()
+		var max_dist := _get_grab_point_max_distance(assembly_root, grab_point)
+		# Forend/bolt must stay reachable while the primary is already aiming the gun.
+		max_dist = maxf(max_dist, secondary_grab_distance)
+		if dist > max_dist * max_dist:
+			continue
+		if dist < closest_dist:
+			closest_grab_point = grab_point
+			closest_dist = dist
+	return closest_grab_point
+
+
 # Returns a transform for hand positioning using our default logic.
 # Used when there are no grab points.
 func _get_default_hand_transform(body : PhysicsBody3D, hand_position : Vector3) -> Transform3D:
@@ -1635,7 +1792,12 @@ func _get_closest() -> ClosestObject:
 			# Seated bolt/slide on a held gun is frozen kinematic so it cannot
 			# underdamp the hand joint — still allow the other hand to grab it.
 			var assembly_holder := _get_holder_pickup(body)
-			if assembly_holder == null or assembly_holder == self:
+			if assembly_holder == self:
+				continue
+			if assembly_holder == null \
+					and not _other_hand_holds_primary_on_assembly(
+						_get_assembly_root(body as PhysicsBody3D)
+					):
 				continue
 		elif body is PhysicalBone3D and _xr_collision_hand:
 			# We support picking up PhysicalBone3D if we're using collision hands
@@ -1660,11 +1822,17 @@ func _get_closest() -> ClosestObject:
 		var new_dist : float = 9999999.99
 		var assembly_root_for_body := _get_assembly_root(body as PhysicsBody3D)
 		var grab_point = null
-		# While the other hand holds a primary grip, prefer brace/foregrip points.
+		# While the other hand holds a primary grip, prefer support then reload grips.
+		# Shotgun has no Alt brace — without an explicit reload search the forend is
+		# easy to miss when only the parent gun collider overlaps the hand.
 		if _other_hand_holds_primary_on_assembly(assembly_root_for_body):
 			grab_point = _find_secondary_support_grabpoint(
 				assembly_root_for_body, global_position
 			)
+			if not grab_point:
+				grab_point = _find_reload_grabpoint(
+					assembly_root_for_body, global_position
+				)
 		if not grab_point:
 			grab_point = _get_closest_grabpoint(body, global_position)
 		var target_body : PhysicsBody3D = body

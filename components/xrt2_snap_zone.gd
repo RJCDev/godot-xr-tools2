@@ -188,6 +188,12 @@ func _on_snap_zone_body_exited(target: Node3D) -> void:
 	# Ensure the object is not in our list
 	_object_in_grab_area.erase(target)
 
+	# Stashing with disable_on_pickup zeroes collision, which fires body_exited.
+	# Keep the snap_zone group while WE still hold the object — otherwise hand
+	# drop (NetworkedSnapZone) thinks it is free and unfreezes it onto the floor.
+	if target == picked_up_object:
+		return
+
 	target.remove_from_group("snap_zone")
 		
 
