@@ -90,18 +90,29 @@ func _ready():
 
 # Called on each frame to update the pickup
 func _physics_process(_delta):
-	# Skip if in editor or not enabled
-	if Engine.is_editor_hint() or not enabled:
+	# Skip if in editor
+	if Engine.is_editor_hint():
 		return
-	
-	# Check if we're picked up and were not in the dropped state (inside the snapzone state)
+
+	# Keep stashed kinematic items posed even when the zone disables itself
+	# after a door-key insert (disable_on_pickup).
 	if is_instance_valid(picked_up_object):
 		if picked_up_object is RigidBody3D:
+			# Kinematic stashed items (door keys): keep posed on the hold point
+			# without a physics joint that can torque the parent rigidbody.
+			if picked_up_object.freeze and snap_in_place and has_node("HoldLocation"):
+				var hold_xf: Transform3D = $HoldLocation.global_transform
+				hold_xf.basis = hold_xf.basis.orthonormalized()
+				picked_up_object.global_transform = hold_xf
+				picked_up_object.scale = Vector3.ONE
 			picked_up_object.linear_velocity = Vector3.ZERO
 			picked_up_object.angular_velocity = Vector3.ZERO
-			
+
 		if not picked_up_object.is_in_group("dropped"):
 			drop_object()
+
+	if not enabled:
+		return
 
 	_refresh_grab_area_objects()
 	_update_close_highlight()
@@ -138,6 +149,7 @@ func drop_object() -> void:
 		_joint = null
 		
 	if picked_up_object is RigidBody3D:
+		picked_up_object.freeze = false
 		picked_up_object.gravity_scale = 1
 		
 	has_dropped.emit(picked_up_object)
@@ -319,49 +331,56 @@ func pick_up_object(target: PhysicsBody3D) -> void:
 				player.stop()
 			player.stream = stash_sound
 			player.play()
-			
+
+	# Neutralize physics BEFORE has_picked_up. Door unlock listeners unfreeze the
+	# parent panel; if the key still collides / is jointed, penetration torque
+	# flings the door to the hinge limit and can leave it unmovable.
+	var stash_kinematic := false
+	if target is RigidBody3D:
+		var rb := target as RigidBody3D
+		_remember_collision_layer = rb.collision_layer
+		_remember_collision_mask = rb.collision_mask
+		rb.linear_velocity = Vector3.ZERO
+		rb.angular_velocity = Vector3.ZERO
+		rb.gravity_scale = 0
+		if disable_on_pickup:
+			rb.collision_layer = 0
+			rb.collision_mask = 0
+			rb.freeze = true
+			rb.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+			stash_kinematic = true
+			enabled = false
+		else:
+			rb.collision_layer = collision_layer_entered
+			rb.collision_mask = 0
+			# Keep the grabbable layer so hands and snap zones can detect holstered items.
+			if collision_layer_entered != 0:
+				rb.set_collision_layer_value(3, true)
+
 	if snap_in_place:
 		# Copy pose without inheriting any non-uniform/scaled basis.
 		var snap_xf := global_transform
 		snap_xf.basis = snap_xf.basis.orthonormalized()
 		picked_up_object.global_transform = snap_xf
 		picked_up_object.scale = Vector3.ONE
-		
-	_joint = Generic6DOFJoint3D.new()
-	add_child(_joint, false, Node.INTERNAL_MODE_BACK)
-	_joint.node_a = $HoldLocation.get_path()
-	_joint.node_b =  picked_up_object.get_path()
-	
-	if picked_up_object is RigidBody3D:
-		picked_up_object.gravity_scale = 0
 
-	# If object picked up then emit signal
+	# Kinematic stash follows HoldLocation in _physics_process — no joint forces.
+	if not stash_kinematic:
+		_joint = Generic6DOFJoint3D.new()
+		add_child(_joint, false, Node.INTERNAL_MODE_BACK)
+		_joint.node_a = $HoldLocation.get_path()
+		_joint.node_b = picked_up_object.get_path()
+
+	# If object picked up then emit signal (safe: key no longer collides)
 	if is_instance_valid(picked_up_object):
 		has_picked_up.emit(picked_up_object)
 		highlight_updated.emit(self, false)
-	
-	# Handle collision info
-	if target is RigidBody3D:
-		if disable_on_pickup:	
-			target.collision_layer = 0
-			target.collision_mask = 0
-			enabled = false
-		else:
-			_remember_collision_layer = target.collision_layer
-			_remember_collision_mask = target.collision_mask
-			
-			target.collision_layer = collision_layer_entered
-			target.collision_mask = 0
-			# Keep the grabbable layer so hands and snap zones can detect holstered items.
-			if collision_layer_entered != 0:
-				target.set_collision_layer_value(3, true)
-			
+
 	picked_up_object.add_to_group("snap_zone")
 	picked_up_object.add_to_group("dropped") # Just in case
-	
+
 	_set_close_highlight(null)
-	
-	
+
 
 # Called when the enabled property has been modified
 func _set_enabled(p_enabled: bool) -> void:

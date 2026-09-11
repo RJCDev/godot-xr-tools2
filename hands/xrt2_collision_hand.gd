@@ -476,6 +476,9 @@ func _is_multi_body_held_pickup() -> bool:
 
 
 func _has_held_for_teleport() -> bool:
+	# Hinged doors must stay on their hinge — never glue/freeze them to the hand.
+	if _pickup != null and _pickup.has_method("is_hinged_hold") and _pickup.is_hinged_hold():
+		return false
 	return _pickup != null and _pickup._picked_up is RigidBody3D
 
 
@@ -1073,8 +1076,12 @@ func _process(_delta: float) -> void:
 
 
 func _should_sync_hand_mesh_to_grab() -> bool:
-	return _pickup != null \
-			and _pickup.has_method("is_secondary_support_hold") \
+	if _pickup == null:
+		return false
+	# Door handles: keep the visible hand on the grab while physics stays tracked.
+	if _pickup.has_method("is_hinged_hold") and _pickup.is_hinged_hold():
+		return true
+	return _pickup.has_method("is_secondary_support_hold") \
 			and _pickup.is_secondary_support_hold()
 
 
@@ -1090,6 +1097,18 @@ func _capture_hand_mesh_grab_lock() -> void:
 	_hand_mesh_grab_local.basis = _hand_mesh_grab_local.basis.orthonormalized()
 	_hand_mesh_grab_locked = true
 	_hand_mesh.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+
+
+## Door handles: seat the visible hand exactly on the grab pose (no offset drift).
+func begin_hinged_hand_mesh_lock() -> void:
+	if not _hand_mesh or not _pickup or not is_instance_valid(_pickup._picked_up):
+		return
+	if not _pickup.get_picked_up_grab_point():
+		return
+	_hand_mesh_grab_local = Transform3D()
+	_hand_mesh_grab_locked = true
+	_hand_mesh.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+	_sync_hand_mesh_to_grab_point()
 
 
 func _get_grab_point_hand_xf(grab_point: XRT2GrabPoint) -> Transform3D:
@@ -1204,8 +1223,13 @@ func _physics_process(delta):
 		if grab_point:
 			distance = _last_tracked_transform.origin.distance_to(grab_point.global_position)
 			
-		# Drop if too far		
-		if distance > drop_distance:
+		# Drop if too far. Hinged doors seat the hand on the handle while the
+		# tracked controller stays farther away — use a wider leash so the grab
+		# is not instantly cancelled.
+		var max_drop := drop_distance
+		if _pickup.has_method("is_hinged_hold") and _pickup.is_hinged_hold():
+			max_drop = maxf(drop_distance, 2.0)
+		if distance > max_drop:
 			if _pickup and _pickup.picked_up:
 				_pickup.drop_held_object()
 				

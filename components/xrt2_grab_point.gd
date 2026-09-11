@@ -81,6 +81,10 @@ extends Node3D
 ## it can not be picked up by another grab point.
 @export var exclusive : bool = false
 
+## Optional override for how far the hand may be from this grab point.
+## [code]0[/code] uses the pickup [member XRT2Pickup.detection_radius].
+@export var max_grab_distance : float = 0.0
+
 ## Highlight behavior if this grab point is closest.
 @export_enum("Highlight", "Only if not picked up", "Disabled") var highlight_mode : int = 0
 

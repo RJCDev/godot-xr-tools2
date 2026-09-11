@@ -318,6 +318,46 @@ func _rebuild_held_joint(which: PhysicsBody3D) -> void:
 	add_child(_joint, false, Node.INTERNAL_MODE_BACK)
 	_joint.node_a = _xr_collision_hand.get_path()
 	_joint.node_b = which.get_path()
+	# Default 6DOF locks linear+angular axes. That overconstrains a hinged door
+	# (panel cannot swing) so configure a soft positional spring instead.
+	if _is_hinged_body(which):
+		_configure_hinged_grab_joint(_joint)
+
+
+## Soft positional spring only — free rotation so the door hinge can swing.
+func _configure_hinged_grab_joint(joint: Generic6DOFJoint3D) -> void:
+	if joint == null:
+		return
+	const stiffness := 320.0
+	const damping := 28.0
+	for axis in [
+		Generic6DOFJoint3D.FLAG_ENABLE_LINEAR_LIMIT,
+		Generic6DOFJoint3D.FLAG_ENABLE_ANGULAR_LIMIT,
+		Generic6DOFJoint3D.FLAG_ENABLE_ANGULAR_SPRING,
+		Generic6DOFJoint3D.FLAG_ENABLE_MOTOR,
+		Generic6DOFJoint3D.FLAG_ENABLE_LINEAR_MOTOR,
+	]:
+		joint.set_flag_x(axis, false)
+		joint.set_flag_y(axis, false)
+		joint.set_flag_z(axis, false)
+	joint.set_flag_x(Generic6DOFJoint3D.FLAG_ENABLE_LINEAR_SPRING, true)
+	joint.set_flag_y(Generic6DOFJoint3D.FLAG_ENABLE_LINEAR_SPRING, true)
+	joint.set_flag_z(Generic6DOFJoint3D.FLAG_ENABLE_LINEAR_SPRING, true)
+	for param_stiff in [
+		Generic6DOFJoint3D.PARAM_LINEAR_SPRING_STIFFNESS,
+	]:
+		joint.set_param_x(param_stiff, stiffness)
+		joint.set_param_y(param_stiff, stiffness)
+		joint.set_param_z(param_stiff, stiffness)
+	for param_damp in [
+		Generic6DOFJoint3D.PARAM_LINEAR_SPRING_DAMPING,
+	]:
+		joint.set_param_x(param_damp, damping)
+		joint.set_param_y(param_damp, damping)
+		joint.set_param_z(param_damp, damping)
+	joint.set_param_x(Generic6DOFJoint3D.PARAM_LINEAR_SPRING_EQUILIBRIUM_POINT, 0.0)
+	joint.set_param_y(Generic6DOFJoint3D.PARAM_LINEAR_SPRING_EQUILIBRIUM_POINT, 0.0)
+	joint.set_param_z(Generic6DOFJoint3D.PARAM_LINEAR_SPRING_EQUILIBRIUM_POINT, 0.0)
 
 
 ## True when this hand holds a primary useable grip (gun stock / pistol grip).
@@ -364,8 +404,14 @@ func _pickup_object_internal(which : PhysicsBody3D, ignore_grab_distance : bool)
 			
 			dest_transform.basis = dest_transform.basis.orthonormalized()
 
-			var is_hand_to_object := _should_snap_hand_to_grab(which, _grab_point)
-			if is_hand_to_object:
+			var is_hinged := _is_hinged_body(which)
+			var is_hand_to_object := (not is_hinged) and _should_snap_hand_to_grab(which, _grab_point)
+			if is_hinged:
+				# Keep the hinge: do not teleport the panel to the palm, and do not
+				# yank the physics hand onto authored handle transforms (often off).
+				# Soft spring joint + mesh lock handle interaction instead.
+				pass
+			elif is_hand_to_object:
 				_place_hand_at_grab_point(dest_transform)
 			else:
 				_place_object_at_hand_attachment(which)
@@ -374,7 +420,11 @@ func _pickup_object_internal(which : PhysicsBody3D, ignore_grab_distance : bool)
 
 			which.add_collision_exception_with(_xr_collision_hand)
 
-			if is_hand_to_object:
+			if is_hinged:
+				if _xr_collision_hand._hand_mesh:
+					_xr_collision_hand._hand_mesh.transform = Transform3D()
+				_orienting_pickup = false
+			elif is_hand_to_object:
 				if _is_secondary_support_grab(which, _grab_point):
 					_begin_pickup_orient(which)
 					if _xr_collision_hand._hand_mesh:
@@ -479,6 +529,11 @@ func _pickup_object_internal(which : PhysicsBody3D, ignore_grab_distance : bool)
 
 	_picked_up.remove_from_group("dropped")
 	picked_up.emit(self, which)
+
+	# After picked_up handlers clear mesh lock, seat the door-handle visual.
+	if _is_hinged_body(which) and _xr_collision_hand \
+			and _xr_collision_hand.has_method("begin_hinged_hand_mesh_lock"):
+		_xr_collision_hand.begin_hinged_hand_mesh_lock()
 
 	if _glue_primary_after_pickup:
 		_glue_primary_after_pickup = false
@@ -1235,20 +1290,56 @@ func _is_secondary_support_grab(body : PhysicsBody3D, grab_point : XRT2GrabPoint
 	return _body_has_useable_grab_point(_get_assembly_root(body))
 
 
+## True while holding a body still attached to a hinge (physics doors).
+func is_hinged_hold() -> bool:
+	return is_instance_valid(_picked_up) and _is_hinged_body(_picked_up)
+
+
+## True when an empty-hand proximity target is available (doors, props, etc.).
+## Loadout draw must not steal grip when this is true.
+func has_closest_pickup() -> bool:
+	return _closest_object != null and is_instance_valid(_closest_object.body)
+
+
 ## Brace or bolt/slide: hand moves to the grab, object stays put.
+## Hinged doors are handled separately (no seating; soft spring joint).
 func _should_snap_hand_to_grab(body : PhysicsBody3D, grab_point : XRT2GrabPoint) -> bool:
 	if _is_secondary_support_grab(body, grab_point):
 		return true
 	if body == null or grab_point == null:
 		return false
+	# Hinged seating is explicit in _pickup_object_internal — never treat doors
+	# as free pickups (that teleports the panel to the palm).
+	if _is_hinged_body(body):
+		return true
 	if grab_point.useable or not grab_point.exclusive:
 		return false
 	return _body_has_useable_grab_point(_get_assembly_root(body))
 
 
+## True while this body is still attached to a HingeJoint3D (unlocked doors, etc.).
+## After PhysicsDoorComponent.Break() clears the hinge, this returns false so free pickup works.
+func _is_hinged_body(body : PhysicsBody3D) -> bool:
+	if body == null or not is_instance_valid(body):
+		return false
+	var parent := body.get_parent()
+	if parent == null:
+		return false
+	for child in parent.get_children():
+		if child is HingeJoint3D:
+			var hinge := child as HingeJoint3D
+			var a = hinge.get_node_or_null(hinge.node_a) if hinge.node_a != NodePath() else null
+			var b = hinge.get_node_or_null(hinge.node_b) if hinge.node_b != NodePath() else null
+			if a == body or b == body:
+				return true
+	return false
+
+
 func _get_grab_point_max_distance(body : PhysicsBody3D, grab_point : XRT2GrabPoint) -> float:
 	if _is_secondary_support_grab(body, grab_point):
 		return secondary_grab_distance
+	if grab_point and grab_point.max_grab_distance > 0.0:
+		return grab_point.max_grab_distance
 	return detection_radius
 
 
@@ -1359,9 +1450,19 @@ func _apply_highlight_for_closest(closest: ClosestObject) -> void:
 			_get_assembly_root(closest.body), closest.grab_point
 		)
 		return
-	# Primary / whole-object highlight only when this is not a brace/bolt point.
-	if closest.grab_point and not closest.grab_point.useable:
+
+	var root := _get_assembly_root(closest.body)
+	# Brace/bolt on multi-grip weapons: no whole-object glow.
+	if closest.grab_point and not closest.grab_point.useable \
+			and _body_has_useable_grab_point(root):
 		return
+
+	# Doors / hinged props: whole-panel highlight (handle meshes are often
+	# farther than secondary_highlight_radius from the grab-point node).
+	if closest.grab_point and _is_hinged_body(closest.body):
+		_add_highlight(closest.body)
+		return
+
 	_add_highlight(closest.body)
 
 
@@ -1469,11 +1570,19 @@ func _get_closest() -> ClosestObject:
 	if not _detection_area.monitoring:
 		return null
 
-	var overlapping_bodies = _detection_area.get_overlapping_bodies()
+	var candidate_bodies: Array = []
+	for body in _detection_area.get_overlapping_bodies():
+		candidate_bodies.append(body)
+	# Grab points with max_grab_distance > detection_radius (e.g. biosample)
+	# need a wider query — the tiny vial collider often misses the hand Area.
+	for body in _query_extended_range_bodies():
+		if not candidate_bodies.has(body):
+			candidate_bodies.append(body)
+
 	var closest : ClosestObject
 	var closest_dist : float = 9999999.99
 
-	for body : Node3D in overlapping_bodies:
+	for body : Node3D in candidate_bodies:
 		if _picked_up:
 			# Ignore if we already picked up with this hand
 			continue
@@ -1574,6 +1683,45 @@ func _get_closest() -> ClosestObject:
 			closest_dist = new_dist
 
 	return closest
+
+
+## Bodies whose grab points need a wider reach than [member detection_radius].
+func _query_extended_range_bodies() -> Array[PhysicsBody3D]:
+	var found: Array[PhysicsBody3D] = []
+	if not is_inside_tree():
+		return found
+	var world := get_world_3d()
+	if world == null or world.direct_space_state == null:
+		return found
+
+	const EXTENDED_QUERY_RADIUS := 0.55
+	var sphere := SphereShape3D.new()
+	sphere.radius = EXTENDED_QUERY_RADIUS
+	var params := PhysicsShapeQueryParameters3D.new()
+	params.shape = sphere
+	params.transform = Transform3D(Basis(), global_position)
+	params.collision_mask = collision_mask
+	params.collide_with_bodies = true
+	params.collide_with_areas = false
+	if _xr_collision_hand:
+		params.exclude = [_xr_collision_hand.get_rid()]
+
+	for hit in world.direct_space_state.intersect_shape(params, 24):
+		var collider = hit.get("collider")
+		if collider is PhysicsBody3D and _body_has_extended_grab_point(collider):
+			found.append(collider)
+	return found
+
+
+func _body_has_extended_grab_point(body: PhysicsBody3D) -> bool:
+	if body == null:
+		return false
+	var grab_points: Array[XRT2GrabPoint] = []
+	_collect_grab_points(_get_assembly_root(body), grab_points)
+	for grab_point in grab_points:
+		if grab_point.max_grab_distance > detection_radius:
+			return true
+	return false
 
 
 func _highlight_meshes(node : Node3D) -> Dictionary[MeshInstance3D, Material]:
