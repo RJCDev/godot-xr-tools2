@@ -412,7 +412,10 @@ func _pickup_object_internal(which : PhysicsBody3D, ignore_grab_distance : bool)
 				# Soft spring joint + mesh lock handle interaction instead.
 				pass
 			elif is_hand_to_object:
-				_place_hand_at_grab_point(dest_transform)
+				# Bolt/slide: seat with authored palm (same offset primaries use).
+				# Brace/foregrip keeps prior live-attachment seating — do not regress it.
+				var is_exclusive_reload := _grab_point.exclusive and not _grab_point.useable
+				_place_hand_at_grab_point(dest_transform, is_exclusive_reload)
 			else:
 				_place_object_at_hand_attachment(which)
 
@@ -530,10 +533,18 @@ func _pickup_object_internal(which : PhysicsBody3D, ignore_grab_distance : bool)
 	_picked_up.remove_from_group("dropped")
 	picked_up.emit(self, which)
 
-	# After picked_up handlers clear mesh lock, seat the door-handle visual.
-	if _is_hinged_body(which) and _xr_collision_hand \
-			and _xr_collision_hand.has_method("begin_hinged_hand_mesh_lock"):
-		_xr_collision_hand.begin_hinged_hand_mesh_lock()
+	# After picked_up handlers clear mesh lock, re-apply grab visuals.
+	if _xr_collision_hand:
+		if _is_hinged_body(which) \
+				and _xr_collision_hand.has_method("begin_hinged_hand_mesh_lock"):
+			# Doors: mesh root sits exactly on the handle grab.
+			_xr_collision_hand.begin_hinged_hand_mesh_lock()
+		elif is_instance_valid(_grab_point) \
+				and _grab_point.exclusive and not _grab_point.useable \
+				and _xr_collision_hand.has_method("begin_reload_grab_mesh_lock"):
+			# Bolt/slide: capture mesh↔grab offset like brace (metacarpal-correct).
+			# Do NOT use hinged identity lock — that puts the mesh root on the grab.
+			_xr_collision_hand.begin_reload_grab_mesh_lock()
 
 	if _glue_primary_after_pickup:
 		_glue_primary_after_pickup = false
@@ -766,11 +777,25 @@ func _get_assembly_root(body: PhysicsBody3D) -> PhysicsBody3D:
 
 
 ## Move the physics hand so the metacarpal attachment sits on dest_transform.
-func _place_hand_at_grab_point(dest_transform: Transform3D) -> void:
+## When [param use_authored_attachment] is true (bolt/slide), use the scene-authored
+## HandAttachment local — same palm offset primary seating uses. Brace/foregrip
+## leaves this false so its existing soft-joint feel is unchanged.
+func _place_hand_at_grab_point(
+	dest_transform: Transform3D,
+	use_authored_attachment: bool = false
+) -> void:
 	if not _xr_collision_hand:
 		return
 	dest_transform.basis = dest_transform.basis.orthonormalized()
-	var attachment_local : Transform3D = get_parent().transform
+	var attachment_local : Transform3D
+	if use_authored_attachment:
+		var attachment := get_parent() as XRT2HandAttachment
+		if attachment and attachment.has_method("get_authored_local_transform"):
+			attachment_local = attachment.get_authored_local_transform()
+		else:
+			attachment_local = get_parent().transform
+	else:
+		attachment_local = get_parent().transform
 	attachment_local.basis = attachment_local.basis.orthonormalized()
 	_xr_collision_hand.global_transform = dest_transform * attachment_local.affine_inverse()
 	_xr_collision_hand.scale = Vector3.ONE
@@ -1387,6 +1412,16 @@ func is_secondary_support_hold() -> bool:
 	if not _picked_up or not _grab_point:
 		return false
 	return _is_secondary_support_grab(_picked_up, _grab_point)
+
+
+## True while holding an exclusive bolt/slide reload grip.
+## Does not require the other hand still holding — once on the slide, keep mesh glue.
+func is_reload_grip_hold() -> bool:
+	if not _picked_up or not _grab_point:
+		return false
+	if not _grab_point.exclusive or _grab_point.useable:
+		return false
+	return _body_has_useable_grab_point(_get_assembly_root(_picked_up))
 
 
 ## Foregrip or bolt/slide grips: highlight only meshes near the grab point.

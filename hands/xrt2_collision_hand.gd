@@ -1081,8 +1081,13 @@ func _should_sync_hand_mesh_to_grab() -> bool:
 	# Door handles: keep the visible hand on the grab while physics stays tracked.
 	if _pickup.has_method("is_hinged_hold") and _pickup.is_hinged_hold():
 		return true
-	return _pickup.has_method("is_secondary_support_hold") \
-			and _pickup.is_secondary_support_hold()
+	# Brace/foregrip: mesh lock (existing — do not change conditions).
+	if _pickup.has_method("is_secondary_support_hold") \
+			and _pickup.is_secondary_support_hold():
+		return true
+	# Bolt/slide reload: same visual glue so soft-joint drift isn't visible.
+	return _pickup.has_method("is_reload_grip_hold") \
+			and _pickup.is_reload_grip_hold()
 
 
 func _capture_hand_mesh_grab_lock() -> void:
@@ -1099,7 +1104,8 @@ func _capture_hand_mesh_grab_lock() -> void:
 	_hand_mesh.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 
 
-## Door handles: seat the visible hand exactly on the grab pose (no offset drift).
+## Seat the visible hand exactly on the grab pose (no offset drift).
+## Used for door handles. Not for gun bolt/slide — use begin_reload_grab_mesh_lock.
 func begin_hinged_hand_mesh_lock() -> void:
 	if not _hand_mesh or not _pickup or not is_instance_valid(_pickup._picked_up):
 		return
@@ -1108,6 +1114,19 @@ func begin_hinged_hand_mesh_lock() -> void:
 	_hand_mesh_grab_local = Transform3D()
 	_hand_mesh_grab_locked = true
 	_hand_mesh.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+	_sync_hand_mesh_to_grab_point()
+
+
+## Bolt/slide: glue visible hand like brace — capture mesh vs grab after palm seating
+## so the metacarpal lands on the grab (editor preview), not the mesh root.
+func begin_reload_grab_mesh_lock() -> void:
+	if not _hand_mesh or not _pickup or not is_instance_valid(_pickup._picked_up):
+		return
+	if not _pickup.get_picked_up_grab_point():
+		return
+	_hand_mesh.transform = Transform3D()
+	_hand_mesh.force_update_transform()
+	_capture_hand_mesh_grab_lock()
 	_sync_hand_mesh_to_grab_point()
 
 
