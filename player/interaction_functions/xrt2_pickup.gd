@@ -665,10 +665,15 @@ func drop_held_object() -> void:
 		_grab_point._occupied = false
 
 	if not is_instance_valid(_picked_up):
-		# Just in case
+		# Just in case — also clear grab intent so HandComponent soft-locks
+		# (force-drop before pickup finished) cannot block the next empty-hand grab.
 		_picked_up = null
 		_grab_point = null
 		_is_primary = false
+		_is_grab = false
+		_pick_input = ""
+		_block_grab_until_release = false
+		_pending_pickup_grab_point = null
 		return
 
 	var was_picked_up = _picked_up
