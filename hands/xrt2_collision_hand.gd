@@ -380,7 +380,7 @@ func _force_teleport_behavior():
 	_visual_teleport_follow_frames = 0 if _has_held_for_teleport() else 6
 	_parent_angular_velocity_cooldown = 2 if _has_held_for_teleport() else 0
 	# PlayerBody runs after this hand and may still move XROrigin (floor snap).
-	# Shorter sticky while holding — visual grab-lock covers the gun; less freeze hitch.
+	# Shorter sticky while holding — visual grab-lock covers the held body; less freeze hitch.
 	_sticky_origin_follow = 2 if _has_held_for_teleport() else 4
 	if _has_held_for_teleport_recovery():
 		_held_teleport_hold_frames = 2
@@ -530,7 +530,7 @@ func _sync_held_to_snap_locals() -> void:
 
 
 ## Keep held bodies glued to the palm during settle. Following the live
-## metacarpal reorients the gun as fingers/tracking move.
+## metacarpal reorients the held body as fingers/tracking move.
 func _get_held_snap_anchor_xf() -> Transform3D:
 	return global_transform
 
@@ -554,7 +554,7 @@ func _clear_held_snap_locals() -> void:
 	_held_teleport_hold_frames = 0
 
 
-## After world pickup, glue the held body to the hand briefly (holster snap already does this).
+## After world pickup, glue the held body to the hand briefly (snap-zone stash already does this).
 func begin_pickup_settle(extra_frames: int = 5) -> void:
 	if not _pickup or not is_instance_valid(_pickup._picked_up):
 		return
@@ -682,7 +682,7 @@ func _try_finish_pending_depenetration() -> void:
 		return
 	_parent_angular_velocity_cooldown = 2
 	# Only enter follow-up frames while still overlapping — avoids freezing the
-	# hand/gun when a single MovementRecovery push already cleared penetration.
+	# hand/held body when a single MovementRecovery push already cleared penetration.
 	var use_tracked_bones := _ghost_skeleton != null and not _has_held_for_teleport()
 	if use_tracked_bones:
 		_on_skeleton_updated(true)
@@ -1062,8 +1062,8 @@ func _process(_delta: float) -> void:
 	if not _held_snap_local.is_empty() and _is_visual_teleport_follow_active():
 		_sync_held_to_snap_locals()
 
-	# Foregrip only: glue visible hand to grab point after orient. Primary grips
-	# (pistol, walkie, rifle stock) follow the physics hand normally.
+	# Support grip only: glue visible hand to grab point after orient. Primary grips
+	# (primary / single-body grips) follow the physics hand normally.
 	var orienting := _is_pickup_orienting()
 	if _was_pickup_orienting and not orienting:
 		if _should_sync_hand_mesh_to_grab():
@@ -1081,11 +1081,11 @@ func _should_sync_hand_mesh_to_grab() -> bool:
 	# Door handles: keep the visible hand on the grab while physics stays tracked.
 	if _pickup.has_method("is_hinged_hold") and _pickup.is_hinged_hold():
 		return true
-	# Brace/foregrip: mesh lock (existing — do not change conditions).
+	# Support grip: mesh lock (existing — do not change conditions).
 	if _pickup.has_method("is_secondary_support_hold") \
 			and _pickup.is_secondary_support_hold():
 		return true
-	# Bolt/slide reload: same visual glue so soft-joint drift isn't visible.
+	# Exclusive sliding grip: same visual glue so soft-joint drift isn't visible.
 	return _pickup.has_method("is_reload_grip_hold") \
 			and _pickup.is_reload_grip_hold()
 
@@ -1105,7 +1105,7 @@ func _capture_hand_mesh_grab_lock() -> void:
 
 
 ## Seat the visible hand exactly on the grab pose (no offset drift).
-## Used for door handles. Not for gun bolt/slide — use begin_reload_grab_mesh_lock.
+## Used for door handles. Not for exclusive sliding grips — use begin_reload_grab_mesh_lock.
 func begin_hinged_hand_mesh_lock() -> void:
 	if not _hand_mesh or not _pickup or not is_instance_valid(_pickup._picked_up):
 		return
@@ -1117,7 +1117,7 @@ func begin_hinged_hand_mesh_lock() -> void:
 	_sync_hand_mesh_to_grab_point()
 
 
-## Bolt/slide: glue visible hand like brace — capture mesh vs grab after palm seating
+## Exclusive sliding: glue visible hand like support — capture mesh vs grab after palm seating
 ## so the metacarpal lands on the grab (editor preview), not the mesh root.
 func begin_reload_grab_mesh_lock() -> void:
 	if not _hand_mesh or not _pickup or not is_instance_valid(_pickup._picked_up):
@@ -1324,7 +1324,7 @@ func _physics_process(delta):
 
 	# Do not apply tracking forces the same frame as a player teleport/turn.
 	# Parent snap-turn angular velocity would double-rotate the hand and yank
-	# the jointed object (visible dip + slide click detectors).
+	# the jointed object (visible dip + child-body motion detectors).
 	if not skip_tracking:
 		if _parent_angular_velocity_cooldown > 0:
 			parent_angular_velocity = Vector3.ZERO
@@ -1537,7 +1537,7 @@ func _teleport_held_bodies(delta: Transform3D, freeze_bodies: bool = true) -> vo
 	for body in _collect_held_physics_bodies(root):
 		if not is_instance_valid(body):
 			continue
-		# Pump/slide etc. held by the other hand — that hand applies the delta.
+		# Child/slider grips held by the other hand — that hand applies the delta.
 		if body != root and _is_directly_held_by_other_pickup(body):
 			continue
 		body.global_transform = delta * body.global_transform
@@ -1578,7 +1578,7 @@ func _get_held_assembly_root(grabbed: RigidBody3D) -> RigidBody3D:
 
 
 func _collect_held_physics_bodies(grabbed: RigidBody3D) -> Array[RigidBody3D]:
-	# Rifles grab the slide child; meshes and barrel rays live on the parent body.
+	# Assemblies may grab a child body; meshes and aim helpers often live on the parent.
 	# Move every rigidbody in the held assembly by the same origin delta.
 	return _collect_held_rigid_bodies(_get_held_assembly_root(grabbed))
 
@@ -1627,7 +1627,7 @@ func _peek_depenetration_push() -> Vector3:
 	var push := Vector3.ZERO
 	push += _compute_hand_collision_shapes_push()
 	# Arm segment queries are the heavy path; skip while holding — the held
-	# body queries cover door/wall penetration for the gun itself.
+	# body queries cover door/wall penetration for the held body itself.
 	if not _has_held_for_teleport():
 		push += _compute_arm_segment_depenetration_push()
 	for body in _get_held_depenetration_bodies():

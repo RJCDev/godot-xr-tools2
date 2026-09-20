@@ -359,7 +359,7 @@ func pick_up_object(target: PhysicsBody3D) -> void:
 		else:
 			rb.collision_layer = collision_layer_entered
 			rb.collision_mask = 0
-			# Keep the grabbable layer so hands and snap zones can detect holstered items.
+			# Keep the grabbable layer so hands and snap zones can detect stashed items.
 			if collision_layer_entered != 0:
 				rb.set_collision_layer_value(3, true)
 
