@@ -1398,23 +1398,15 @@ func _is_opposite_secondary_for_primary(
 	return true
 
 
-## Prefer the nearer assist grip (support vs exclusive sliding) so highlight matches selection.
+## Pick one assist grip (support vs exclusive sliding) so highlight matches selection.
+## Prefer support whenever it is reachable; exclusive is only used when support is not.
 func _pick_weapon_assist_grabpoint(
 	assembly_root: PhysicsBody3D, hand_position: Vector3
 ) -> XRT2GrabPoint:
 	var support := _find_secondary_support_grabpoint(assembly_root, hand_position)
-	var reload := _find_reload_grabpoint(assembly_root, hand_position)
-	if support == null:
-		return reload
-	if reload == null:
+	if support != null:
 		return support
-
-	var support_dist := (support.get_detection_origin() - hand_position).length_squared()
-	var reload_dist := (reload.get_detection_origin() - hand_position).length_squared()
-	# Nearer wins. On a tie, prefer exclusive sliding — its zone is smaller and more precise.
-	if reload_dist <= support_dist:
-		return reload
-	return support
+	return _find_reload_grabpoint(assembly_root, hand_position)
 
 
 func _update_closest_object() -> void:
@@ -1663,7 +1655,10 @@ func _should_skip_closest_highlight(closest: ClosestObject) -> bool:
 
 func _is_closest_highlighted(closest: ClosestObject) -> bool:
 	var key := _get_highlight_key(closest.body, closest.grab_point)
-	return key != null and _highlighted_bodies.has(key)
+	if key == null or not _highlighted_bodies.has(key):
+		return false
+	# Empty mesh sets still occupy the map — treat as not highlighted so we retry.
+	return not _highlighted_bodies[key].original_materials.is_empty()
 
 
 func _get_highlight_key(
@@ -1897,7 +1892,7 @@ func _get_closest() -> ClosestObject:
 		var new_dist : float = 9999999.99
 		var assembly_root_for_body := _get_assembly_root(body as PhysicsBody3D)
 		var grab_point = null
-		# While the other hand holds a primary grip, pick the nearer assist
+		# While the other hand holds a primary grip, pick one assist grip
 		# (support vs exclusive sliding) — never highlight/select both.
 		# Assemblies without a support grip still resolve exclusive sliding.
 		if _other_hand_holds_primary_on_assembly(assembly_root_for_body):
@@ -2074,13 +2069,24 @@ func _collect_assist_rival_grab_points(
 		return rivals
 	var grab_points: Array[XRT2GrabPoint] = []
 	_collect_grab_points(assembly_root, grab_points)
+	var owner_exclusive := owner_grab_point.exclusive
 	for grab_point in grab_points:
 		if grab_point == null or grab_point == owner_grab_point:
 			continue
-		# Only other assist grips (support / exclusive sliding) compete for highlight.
+		# Only other assist grips compete for highlight.
 		if grab_point.useable:
 			continue
 		if not _body_has_useable_grab_point(assembly_root):
+			continue
+		# Left/right support twins share one brace. Voronoi between them steals
+		# the foregrip from whichever twin is a millimeter farther.
+		if not owner_exclusive and not grab_point.exclusive:
+			continue
+		# Support highlights sit near exclusive grips on many assemblies. Treating
+		# exclusive points as rivals empties the support highlight. Only filter
+		# the other way: exclusive highlight should not light support meshes.
+		# Sliding-body meshes are skipped separately while collecting.
+		if not owner_exclusive and grab_point.exclusive:
 			continue
 		rivals.append(grab_point)
 	return rivals
@@ -2105,6 +2111,11 @@ func _collect_meshes_near_point(
 			ret[mesh_instance] = mesh_instance.material_overlay
 			mesh_instance.material_overlay = _highlight_material
 	for child in node.get_children():
+		# Support brace: stay on the assembly visual tree. Child physics bodies
+		# (bolt carriers / slides) have their own exclusive grips.
+		if owner_grab_point != null and not owner_grab_point.exclusive \
+				and child is PhysicsBody3D:
+			continue
 		_collect_meshes_near_point(
 			child, point, radius, ret, owner_grab_point, rival_grab_points
 		)
@@ -2128,9 +2139,13 @@ func _add_near_grab_point_highlight(
 	assembly_root: Node3D, grab_point: XRT2GrabPoint
 ) -> void:
 	if _highlighted_bodies.has(grab_point):
-		if not _highlighted_bodies[grab_point].pickups.has(self):
-			_highlighted_bodies[grab_point].pickups.push_back(self)
-		return
+		var existing: HighlightedBody = _highlighted_bodies[grab_point]
+		if not existing.original_materials.is_empty():
+			if not existing.pickups.has(self):
+				existing.pickups.push_back(self)
+			return
+		# Prior pass stored an empty set (e.g. over-filtered rivals) — rebuild.
+		_highlighted_bodies.erase(grab_point)
 
 	var search_root: Node3D = assembly_root
 	var radius: float = secondary_highlight_radius
