@@ -244,6 +244,28 @@ func get_pick_input() -> String:
 func cancel_pickup_attempt() -> void:
 	_is_grab = false
 	_pick_input = ""
+	_pending_pickup_grab_point = null
+
+
+## True when some pickup hand is actively using this grab point.
+func _is_grab_point_held_by_any_pickup(grab_point: XRT2GrabPoint) -> bool:
+	if grab_point == null or not is_instance_valid(grab_point):
+		return false
+	for pickup: XRT2Pickup in _pickup_handlers:
+		if not is_instance_valid(pickup):
+			continue
+		if pickup.get_picked_up_grab_point() == grab_point:
+			return true
+	return false
+
+
+## Occupied flag can stick after holster/loadout overwrite — self-heal when unused.
+func _is_grab_point_blocked(grab_point: XRT2GrabPoint) -> bool:
+	if grab_point == null or not is_instance_valid(grab_point):
+		return true
+	if grab_point._occupied and not _is_grab_point_held_by_any_pickup(grab_point):
+		grab_point._occupied = false
+	return grab_point._occupied
 
 
 ## Returns true if we're the primary hand holding this object
@@ -272,6 +294,10 @@ func is_multi_body_assembly() -> bool:
 
 ## Pick up this object
 func pickup_object(which : PhysicsBody3D):
+	# Never overwrite an existing hold — that leaves the previous grab point
+	# stuck with _occupied=true (per-object secondary/forend soft-lock).
+	if is_instance_valid(_picked_up) and _picked_up != which:
+		drop_held_object()
 	_pickup_object_internal(which, false)
 
 
@@ -459,6 +485,7 @@ func _pickup_object_internal(which : PhysicsBody3D, ignore_grab_distance : bool)
 			# brace vs primary fire gating aligned with what the hand highlighted).
 			# Holster force-pickup has no stage — resolve closest instead.
 			var staged := _consume_pending_grab_point(which)
+			var previous_grab_point := _grab_point
 			if staged:
 				_grab_point = staged
 			else:
@@ -466,6 +493,11 @@ func _pickup_object_internal(which : PhysicsBody3D, ignore_grab_distance : bool)
 			# Figure out our grab position
 			var dest_transform : Transform3D
 			if _grab_point:
+				# Same-body re-seat (L/R forend) must free the prior point.
+				if is_instance_valid(previous_grab_point) \
+						and previous_grab_point != _grab_point \
+						and previous_grab_point._occupied:
+					previous_grab_point._occupied = false
 				dest_transform = _grab_point.get_hand_transform(global_position)
 				_xr_collision_hand.finger_poses = _grab_point.finger_poses
 				_xr_collision_hand.open_finger_poses = _grab_point.open_finger_poses
@@ -1156,8 +1188,17 @@ func _process(_delta):
 	var closest_is_secondary := _closest_object \
 			and is_instance_valid(_closest_object.body) \
 			and _is_secondary_support_grab(_closest_object.body, _closest_object.grab_point)
+	var closest_is_reload := _closest_object \
+			and is_instance_valid(_closest_object.body) \
+			and _is_reload_grip(_closest_object.body, _closest_object.grab_point)
+	var closest_is_weapon_assist := closest_is_secondary or closest_is_reload
 
 	# Don't allow a new grab until both actions release after a drop.
+	# Exception: forend/brace on a gun the other hand already holds — grip often
+	# stays down after a trigger-release bounce; blocking forever feels broken.
+	if _block_grab_until_release and closest_is_weapon_assist:
+		_block_grab_until_release = false
+
 	if _block_grab_until_release:
 		if grip_now or pick_now:
 			_was_drop_pressed = grip_now
@@ -1172,11 +1213,14 @@ func _process(_delta):
 			# Primary / useable grips stay sticky; holster Droppable handles intentional drop.
 			_was_drop_pressed = grip_now
 			_was_pick_pressed = pick_now
-		elif _is_secondary_support_grab(_picked_up, _grab_point):
-			# Secondary gun grips: trigger-hold only (never sticky, never grip-held).
+		elif _is_secondary_support_grab(_picked_up, _grab_point) \
+				or _is_weapon_reload_grip(_picked_up, _grab_point):
+			# Brace / bolt / pump: either grip or trigger keeps the hold.
+			# Releasing only the button that started the grab (while the other stays
+			# down) used to drop immediately and soft-lock re-grab.
 			_was_drop_pressed = grip_now
 			_was_pick_pressed = pick_now
-			if not pick_now:
+			if not grip_now and not pick_now:
 				drop_held_object()
 		elif grab_toggle:
 			# Sticky: only grip toggles/releases can drop; trigger release is ignored.
@@ -1196,19 +1240,20 @@ func _process(_delta):
 				drop_held_object()
 			_was_drop_pressed = grip_now
 			_was_pick_pressed = pick_now
-	elif closest_is_secondary:
-		# Secondary support: trigger edge only. Grip must not latch or block pickup.
+	elif closest_is_weapon_assist:
+		# Brace / pump / bolt on a held weapon: grip or trigger edge both grab.
+		var was_grip_pressed := _was_drop_pressed
+		var grip_pressed_edge := grip_now and not was_grip_pressed
 		_was_drop_pressed = grip_now
 		_was_pick_pressed = pick_now
-		if _pick_input == grab_action or (_is_grab and _pick_input != pick_action):
-			_is_grab = false
-			_pick_input = ""
-		if not _block_grab_until_release and pick_pressed_edge \
-				and _closest_object and is_instance_valid(_closest_object.body):
-			_is_grab = true
-			_pick_input = pick_action
-			_stage_pickup_attempt(_closest_object)
-			return
+
+		if not _block_grab_until_release and _closest_object \
+				and is_instance_valid(_closest_object.body):
+			if pick_pressed_edge or grip_pressed_edge:
+				_is_grab = true
+				_pick_input = pick_action if pick_pressed_edge else grab_action
+				_stage_pickup_attempt(_closest_object)
+				return
 	else:
 		# Empty-hand world pickup: trigger only, except bolt/slide reload grips on a
 		# weapon already held by the other hand — those also accept grip.
@@ -1512,15 +1557,21 @@ func _is_reload_grip(body : PhysicsBody3D, grab_point : XRT2GrabPoint) -> bool:
 	return holder != null and holder != self
 
 
-## Used by HandComponent so loadout grip does not steal bolt/slide reload.
+## Used by HandComponent so loadout grip does not steal bolt/slide reload or brace.
+## Ignores post-drop button block — a free hand on a held weapon must win over holster draw.
 func can_grip_pickup_reload() -> bool:
-	if _picked_up or _block_grab_until_release:
+	if _picked_up:
 		return false
 	if not _closest_object or not is_instance_valid(_closest_object.body):
 		_update_closest_object()
 	if not _closest_object or not is_instance_valid(_closest_object.body):
 		return false
-	return _is_reload_grip(_closest_object.body, _closest_object.grab_point)
+	if _is_reload_grip(_closest_object.body, _closest_object.grab_point):
+		return true
+	return _is_secondary_support_grab(_closest_object.body, _closest_object.grab_point) \
+			and _other_hand_holds_primary_on_assembly(
+				_get_assembly_root(_closest_object.body)
+			)
 
 
 ## True when the pending (or current) grab point is a primary/useable grip.
@@ -1569,7 +1620,7 @@ func _should_skip_grab_point_highlight(grab_point: XRT2GrabPoint) -> bool:
 		return true
 	if grab_point.highlight_mode != 1:
 		return false
-	if grab_point._occupied:
+	if _is_grab_point_blocked(grab_point):
 		return true
 	var parent := grab_point.get_parent()
 	if parent is RigidBody3D:
@@ -1652,7 +1703,7 @@ func _get_closest_grabpoint(body : PhysicsBody3D, hand_position : Vector3, ignor
 		else:
 			if not grab_point.right_hand:
 				continue
-		if grab_point._occupied:
+		if _is_grab_point_blocked(grab_point):
 			continue
 
 		var dist = (grab_point.get_detection_origin() - hand_position).length_squared()
@@ -1685,7 +1736,7 @@ func _find_secondary_support_grabpoint(
 			continue
 		if not is_left_hand and not grab_point.right_hand:
 			continue
-		if grab_point._occupied:
+		if _is_grab_point_blocked(grab_point):
 			continue
 
 		var dist := (grab_point.get_detection_origin() - hand_position).length_squared()
@@ -1718,7 +1769,7 @@ func _find_reload_grabpoint(
 			continue
 		if not is_left_hand and not grab_point.right_hand:
 			continue
-		if grab_point._occupied:
+		if _is_grab_point_blocked(grab_point):
 			continue
 		if not _grab_point_allowed_for_pickup(assembly_root, grab_point):
 			continue
