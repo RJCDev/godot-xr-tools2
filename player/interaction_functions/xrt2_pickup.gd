@@ -247,6 +247,19 @@ func cancel_pickup_attempt() -> void:
 	_pending_pickup_grab_point = null
 
 
+## Staged grab-point name from the trigger/grip edge (empty if none).
+func get_pending_grab_point_name() -> String:
+	if _pending_pickup_grab_point and is_instance_valid(_pending_pickup_grab_point):
+		return _pending_pickup_grab_point.name
+	return ""
+
+
+## Pin the grab point before pickup_object so remotes seat the same handle.
+func set_pending_grab_point(grab_point: Node) -> void:
+	if grab_point is XRT2GrabPoint:
+		_pending_pickup_grab_point = grab_point
+
+
 ## True when some pickup hand is actively using this grab point.
 func _is_grab_point_held_by_any_pickup(grab_point: XRT2GrabPoint) -> bool:
 	if grab_point == null or not is_instance_valid(grab_point):
