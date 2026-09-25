@@ -215,12 +215,14 @@ func _process_modification() -> void:
 	elif parent is XRT2CollisionHand:
 		var collision_hand : XRT2CollisionHand = parent
 
-		# See if we're using a hand tracker
-		var hand_tracker: XRHandTracker = collision_hand.get_hand_tracker()
-		if hand_tracker:
-			_update_on_hand_tracker(skeleton, hand_tracker)
-			return
+		# Remote replicas must not sample this headset's tracker.
+		if not collision_hand.ignore_local_controller_input:
+			# See if we're using a hand tracker
+			var hand_tracker: XRHandTracker = collision_hand.get_hand_tracker()
+			if hand_tracker:
+				_update_on_hand_tracker(skeleton, hand_tracker)
+				return
 
-		tracker = XRServer.get_tracker("left_hand" if collision_hand.hand == 0 else "right_hand")
+			tracker = XRServer.get_tracker("left_hand" if collision_hand.hand == 0 else "right_hand")
 
 	_update_on_fallback(skeleton, tracker)

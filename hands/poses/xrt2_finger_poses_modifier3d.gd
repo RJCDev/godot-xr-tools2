@@ -101,7 +101,8 @@ func _process_modification() -> void:
 	elif parent is XRT2CollisionHand:
 		var xr_parent: XRT2CollisionHand = parent
 		hand = xr_parent.hand
-		tracker = XRServer.get_tracker("left_hand" if xr_parent.hand == 0 else "right_hand")
+		if not xr_parent.ignore_local_controller_input:
+			tracker = XRServer.get_tracker("left_hand" if xr_parent.hand == 0 else "right_hand")
 	elif parent is XRT2GrabPoint:
 		## Prioritise left hand
 		hand = 0 if parent.left_hand else 1
@@ -109,8 +110,15 @@ func _process_modification() -> void:
 	var trigger: float = 1.0
 	var grip: float = 1.0
 
+	if parent is XRT2CollisionHand and parent.ignore_local_controller_input:
+		if parent.visual_hold_active:
+			trigger = parent.visual_hold_trigger
+			grip = parent.visual_hold_grip
+		else:
+			trigger = 0.0
+			grip = 0.0
 	# Check our tracker for trigger and grip values
-	if tracker:
+	elif tracker:
 		var trigger_value : Variant = tracker.get_input(trigger_action)
 		if trigger_value:
 			trigger = trigger_value

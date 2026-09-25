@@ -314,6 +314,36 @@ func pickup_object(which : PhysicsBody3D):
 	_pickup_object_internal(which, false)
 
 
+## Finger pose + mesh seat for a remote replica. Does not create a physics joint
+## and does not read the local headset's controller.
+func apply_visual_hold(which : PhysicsBody3D) -> void:
+	if not which or not _xr_collision_hand:
+		return
+	var grab_point = _get_closest_grabpoint(which, global_position, true)
+	if not grab_point:
+		return
+	_xr_collision_hand.visual_hold_active = true
+	_xr_collision_hand.visual_hold_trigger = 0.0
+	_xr_collision_hand.visual_hold_grip = 1.0
+	_xr_collision_hand.finger_poses = grab_point.finger_poses
+	_xr_collision_hand.open_finger_poses = grab_point.open_finger_poses
+	var dest : Transform3D = grab_point.get_hand_transform(_xr_collision_hand.global_position)
+	dest.basis = dest.basis.orthonormalized()
+	if _xr_collision_hand._hand_mesh:
+		_xr_collision_hand._hand_mesh.global_transform = dest
+
+
+## Clear a visual-only hold (remote replica released / holstered).
+func clear_visual_hold() -> void:
+	if not _xr_collision_hand:
+		return
+	_xr_collision_hand.visual_hold_active = false
+	_xr_collision_hand.finger_poses = null
+	_xr_collision_hand.open_finger_poses = null
+	if _xr_collision_hand._hand_mesh:
+		_xr_collision_hand._hand_mesh.transform = Transform3D()
+
+
 ## Force pickup (e.g. snap/inventory draw): ignore grab-point max distance.
 func force_pickup_object(which : PhysicsBody3D) -> bool:
 	if _picked_up == which:

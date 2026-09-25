@@ -76,6 +76,15 @@ const ORIENT_DISPLACEMENT := 0.05
 ## Should we emit input?
 @export var emit_input : bool = true
 
+## When true this hand does not read the local XR controller or hand tracker.
+## Used for remote-player replicas so only the owning player drives finger poses.
+var ignore_local_controller_input : bool = false
+
+## Static grip/trigger used while a remote replica is visually holding an item.
+var visual_hold_active : bool = false
+var visual_hold_trigger : float = 0.0
+var visual_hold_grip : float = 1.0
+
 ## Properties related to tracking
 @export_group("Tracking")
 
