@@ -1553,6 +1553,13 @@ func has_closest_pickup() -> bool:
 	return _closest_object != null and is_instance_valid(_closest_object.body)
 
 
+## Body currently selected as the empty-hand proximity target, or null.
+func get_closest_pickup_body() -> PhysicsBody3D:
+	if _closest_object and is_instance_valid(_closest_object.body):
+		return _closest_object.body
+	return null
+
+
 ## Support or exclusive sliding: hand moves to the grab, object stays put.
 ## Hinged doors are handled separately (no seating; soft spring joint).
 func _should_snap_hand_to_grab(body : PhysicsBody3D, grab_point : XRT2GrabPoint) -> bool:
