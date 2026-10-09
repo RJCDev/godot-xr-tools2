@@ -110,6 +110,11 @@ func _physics_process(_delta):
 
 		if not picked_up_object.is_in_group("dropped"):
 			drop_object()
+		else:
+			# Slot is occupied. Do not replace the snapped object with another one
+			# that happens to overlap the zone. Still update the grab-out highlight.
+			_update_close_highlight()
+			return
 
 	if not enabled:
 		return
