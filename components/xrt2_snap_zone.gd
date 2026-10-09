@@ -40,6 +40,10 @@ enum SnapMode {
 ## Snap mode
 @export var snap_mode : SnapMode = SnapMode.DROPPED
 
+## When false, only an explicit pick_up_object call snaps (grip holster).
+## The zone will not grab an item just because it overlaps.
+@export var auto_snap : bool = true
+
 ## Require snap items to be in specified group
 @export var snap_require : String = ""
 
@@ -121,6 +125,11 @@ func _physics_process(_delta):
 
 	_refresh_grab_area_objects()
 	_update_close_highlight()
+
+	# Grip holsters call pick_up_object themselves. Do not steal a held
+	# walkie or pistol just because the hand is inside the hip zone.
+	if not auto_snap:
+		return
 		
 	# Check for any object in range that can be grabbed
 	for o in _object_in_grab_area:
