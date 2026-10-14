@@ -318,6 +318,13 @@ var _ghost_mesh: Node3D
 var _hand_mesh_grab_local: Transform3D = Transform3D()
 var _hand_mesh_grab_locked: bool = false
 var _was_pickup_orienting: bool = false
+## Body-arm IK marker (LeftHandIK / RightHandIK). Follows the visible hand while that
+## mesh is glued to a grab, then returns to its rest pose on the physics palm.
+var _body_hand_ik: Marker3D
+var _body_hand_ik_rest: Transform3D = Transform3D()
+var _body_hand_ik_from_mesh: Transform3D = Transform3D()
+var _body_hand_ik_follow: bool = false
+var _body_hand_ik_saved_priority: int = 0
 
 # Skeleton collisions
 var _hand_tracking_parent: XRNode3D
@@ -432,6 +439,7 @@ func _on_pickup_held_released(
 func _clear_hand_mesh_grab_lock() -> void:
 	_hand_mesh_grab_locked = false
 	_hand_mesh_grab_local = Transform3D()
+	_end_body_hand_ik_follow()
 	if _hand_mesh:
 		_hand_mesh.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_INHERIT
 
@@ -1166,9 +1174,62 @@ func _sync_hand_mesh_to_grab_point() -> void:
 			return
 
 	var grab_xf: Transform3D = _get_grab_point_hand_xf(grab_point)
+	# Record the arm-target offset while the mesh is still on the physics palm.
+	_begin_body_hand_ik_follow()
 	var xf: Transform3D = grab_xf * _hand_mesh_grab_local
 	xf.basis = xf.basis.orthonormalized() * XRServer.world_scale
 	_hand_mesh.global_transform = xf
+	_apply_body_hand_ik_follow()
+
+
+func _get_body_hand_ik() -> Marker3D:
+	var ik_name := "RightHandIK" if hand == 1 else "LeftHandIK"
+	var node := get_node_or_null(ik_name)
+	return node as Marker3D
+
+
+## Keep the body arm on the visible hand. The IK marker otherwise stays on the
+## physics palm, which does not follow a kinematically driven bolt.
+func _begin_body_hand_ik_follow() -> void:
+	if _body_hand_ik_follow or _hand_mesh == null:
+		return
+	var ik := _get_body_hand_ik()
+	if ik == null:
+		return
+	_body_hand_ik = ik
+	_body_hand_ik_rest = ik.transform
+	_body_hand_ik_from_mesh = _hand_mesh.global_transform.affine_inverse() * ik.global_transform
+	_body_hand_ik_from_mesh.basis = _body_hand_ik_from_mesh.basis.orthonormalized()
+	_body_hand_ik_follow = true
+	_body_hand_ik_saved_priority = process_priority
+	# Skeleton modifiers read this marker later in idle process. Run first so the
+	# arm matches the hand on the same frame the bolt moves.
+	process_priority = -50
+	ik.top_level = true
+	ik.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+
+
+func _apply_body_hand_ik_follow() -> void:
+	if not _body_hand_ik_follow or _body_hand_ik == null or _hand_mesh == null:
+		return
+	if not is_instance_valid(_body_hand_ik):
+		_body_hand_ik_follow = false
+		return
+	var xf := _hand_mesh.global_transform * _body_hand_ik_from_mesh
+	xf.basis = xf.basis.orthonormalized()
+	_body_hand_ik.global_transform = xf
+
+
+func _end_body_hand_ik_follow() -> void:
+	if not _body_hand_ik_follow:
+		return
+	_body_hand_ik_follow = false
+	process_priority = _body_hand_ik_saved_priority
+	if _body_hand_ik != null and is_instance_valid(_body_hand_ik):
+		_body_hand_ik.top_level = false
+		_body_hand_ik.transform = _body_hand_ik_rest
+		_body_hand_ik.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_INHERIT
+	_body_hand_ik = null
 
 
 # Handle physics processing
