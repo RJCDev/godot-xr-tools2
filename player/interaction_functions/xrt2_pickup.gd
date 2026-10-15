@@ -314,8 +314,9 @@ func pickup_object(which : PhysicsBody3D):
 	_pickup_object_internal(which, false)
 
 
-## Finger pose + mesh seat for a remote replica. Does not create a physics joint
-## and does not read the local headset's controller.
+## Finger curl for a remote replica. Does not create a physics joint and does not
+## move the hand mesh. Witnesses follow the relayed physics-hand pose; seating the
+## mesh on a locally chosen grab point puts a support hand on the wrong grip.
 func apply_visual_hold(which : PhysicsBody3D) -> void:
 	if not which or not _xr_collision_hand:
 		return
@@ -327,10 +328,8 @@ func apply_visual_hold(which : PhysicsBody3D) -> void:
 	_xr_collision_hand.visual_hold_grip = 1.0
 	_xr_collision_hand.finger_poses = grab_point.finger_poses
 	_xr_collision_hand.open_finger_poses = grab_point.open_finger_poses
-	var dest : Transform3D = grab_point.get_hand_transform(_xr_collision_hand.global_position)
-	dest.basis = dest.basis.orthonormalized()
 	if _xr_collision_hand._hand_mesh:
-		_xr_collision_hand._hand_mesh.global_transform = dest
+		_xr_collision_hand._hand_mesh.transform = Transform3D()
 
 
 ## Clear a visual-only hold (remote replica released / holstered).
