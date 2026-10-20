@@ -40,7 +40,7 @@ enum SnapMode {
 ## Snap mode
 @export var snap_mode : SnapMode = SnapMode.DROPPED
 
-## When false, only an explicit pick_up_object call snaps (grip holster).
+## When false, only an explicit pick_up_object call snaps.
 ## The zone will not grab an item just because it overlaps.
 @export var auto_snap : bool = true
 
@@ -126,8 +126,8 @@ func _physics_process(_delta):
 	_refresh_grab_area_objects()
 	_update_close_highlight()
 
-	# Grip holsters call pick_up_object themselves. Do not steal a held
-	# walkie or pistol just because the hand is inside the hip zone.
+	# Callers that draw from this zone call pick_up_object themselves. Do not
+	# steal a held object just because the hand overlaps the zone.
 	if not auto_snap:
 		return
 		
@@ -268,7 +268,7 @@ func _update_close_highlight() -> void:
 		_set_close_highlight(null)
 		return
 
-	# Holstered item: show ring when a physics hand is in range (grab-out cue).
+	# Occupied zone: show the ring when a physics hand is in range (grab-out cue).
 	if is_instance_valid(picked_up_object):
 		if _is_hand_in_grab_area():
 			_set_close_highlight(picked_up_object)

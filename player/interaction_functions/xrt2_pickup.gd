@@ -332,7 +332,7 @@ func apply_visual_hold(which : PhysicsBody3D) -> void:
 		_xr_collision_hand._hand_mesh.transform = Transform3D()
 
 
-## Clear a visual-only hold (remote replica released / holstered).
+## Clear a visual-only hold (remote replica released or returned to a snap zone).
 func clear_visual_hold() -> void:
 	if not _xr_collision_hand:
 		return
@@ -525,7 +525,7 @@ func _pickup_object_internal(which : PhysicsBody3D, ignore_grab_distance : bool)
 
 			# Prefer the staged grab point from the trigger/grip edge (keeps secondary
 			# brace vs primary fire gating aligned with what the hand highlighted).
-			# Holster force-pickup has no stage — resolve closest instead.
+			# A forced pickup has no staged grab point — resolve the closest instead.
 			var staged := _consume_pending_grab_point(which)
 			var previous_grab_point := _grab_point
 			if staged:
@@ -1529,6 +1529,23 @@ func is_hinged_hold() -> bool:
 	return is_instance_valid(_picked_up) and _is_hinged_body(_picked_up)
 
 
+## Stored loadout item currently inside a snap zone. A loose copy of the same
+## item is not in snap_zone, so trigger pickup can still reach it.
+func _is_snapped_loadout(body: Node) -> bool:
+	if body == null or not body.is_in_group("snap_zone"):
+		return false
+	return _node_has_loadout_flag(body)
+
+
+func _node_has_loadout_flag(node: Node) -> bool:
+	if node != null and node.is_in_group("snap_blocks_trigger"):
+		return true
+	for child in node.get_children():
+		if _node_has_loadout_flag(child):
+			return true
+	return false
+
+
 ## Snap-zone stash: collision off + kinematic freeze. body_exited may strip the
 ## snap_zone group early, so also detect the stash physics state.
 func _is_stashed_in_snap_zone(body: PhysicsBody3D) -> bool:
@@ -1927,6 +1944,12 @@ func _get_closest() -> ClosestObject:
 			continue
 		else:
 			# Skip anything else
+			continue
+
+		# A snapped loadout item stays collidable, so a reach past it can select
+		# it. Grip draws those. Trigger only grabs one that is still loose
+		# (not in a snap zone).
+		if _is_snapped_loadout(body):
 			continue
 
 		var by : XRT2Pickup = _get_holder_pickup(body)
