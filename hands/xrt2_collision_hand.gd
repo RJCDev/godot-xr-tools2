@@ -331,9 +331,14 @@ var _hand_tracking_parent: XRNode3D
 var _palm_collision_shape: CollisionShape3D
 var _digit_collision_shapes: Dictionary[String, CollisionShape3D]
 var _arm_depenetration_areas: Array[Area3D] = []
+var _elbow_obstruction: Node3D
+var _hand_obstruction_to: Node3D
 
 const ARM_DEPENETRATION_GROUP_LEFT := "arm_depenetration_left"
 const ARM_DEPENETRATION_GROUP_RIGHT := "arm_depenetration_right"
+const _DOOR_PHYSICS_LAYER := 256
+const _ELBOW_LINE_MIN_PAST := 0.04
+const _ELBOW_LINE_MIN_FACE_DOT := 0.2
 
 # Target used to position physics colliders inside _integrate_forces.
 var _shape_update_target: Transform3D
@@ -1670,13 +1675,111 @@ func _unfreeze_teleported_held_bodies() -> void:
 	_held_bodies_to_unfreeze.clear()
 
 
+## After snap/teleport only (caller is post-origin recovery). A hand can sit
+## fully on the far side of a hinged door without overlapping it; overlap
+## depenetration then no-ops and tracking yanks the panel.
+##
+## The authored elbow marker lives on the IK arm, which follows the physics
+## hand — after a forward teleport both ends can already be on the far side,
+## so the elbow ray misses. Try elbow first (shorter, more conservative),
+## then the head (stays on the body side). Door layer only; toward-head
+## like overlap. Guns keep colliding.
+func _resolve_elbow_line_obstruction() -> bool:
+	if _is_pickup_orienting():
+		return false
+	if _pickup != null and _pickup.has_method("is_hinged_hold") and _pickup.is_hinged_hold():
+		return false
+
+	var to_node := _get_hand_obstruction_target()
+	if to_node == null:
+		return false
+	var to := to_node.global_position
+
+	var elbow := _get_elbow_obstruction_origin()
+	if elbow != null and _try_door_line_obstruction(elbow.global_position, to):
+		return true
+
+	var head := _get_player_reference_position()
+	if head.distance_squared_to(to) < 0.0004:
+		return false
+	if elbow != null and head.distance_squared_to(elbow.global_position) < 0.01:
+		return false
+	return _try_door_line_obstruction(head, to)
+
+
+func _try_door_line_obstruction(from: Vector3, to: Vector3) -> bool:
+	var door_mask := depenetration_collision_mask & _DOOR_PHYSICS_LAYER
+	if door_mask == 0:
+		return false
+
+	var span := to - from
+	if span.length_squared() < 0.0004:
+		return false
+
+	var space := get_world_3d().direct_space_state if get_world_3d() else null
+	if space == null:
+		return false
+
+	var query := PhysicsRayQueryParameters3D.create(from, to)
+	query.collision_mask = door_mask
+	query.collide_with_areas = false
+	query.exclude = _get_depenetration_exclude_rids()
+	var hit := space.intersect_ray(query)
+	if hit.is_empty():
+		return false
+
+	var hit_pos: Vector3 = hit.position
+	if to.distance_to(hit_pos) < _ELBOW_LINE_MIN_PAST:
+		return false
+
+	var dir := span.normalized()
+	var hit_normal: Vector3 = hit.get("normal", -dir)
+	if hit_normal.length_squared() < 0.000001:
+		hit_normal = -dir
+	else:
+		hit_normal = hit_normal.normalized()
+	# Park on the body side of the face we hit, not a graze along the leaf.
+	if hit_normal.dot(from - hit_pos) <= 0.0:
+		hit_normal = -hit_normal
+	if hit_normal.dot(from - hit_pos) <= 0.0:
+		return false
+	if absf(hit_normal.dot(dir)) < _ELBOW_LINE_MIN_FACE_DOT:
+		return false
+
+	var parked: Vector3 = hit_pos + hit_normal * maxf(depenetration_margin_epsilon, 0.04)
+	# Do not use overlap's 1m clamp — the hand can be a full teleport past the leaf.
+	var translation := _constrain_push_toward_player(parked - to, to)
+	if translation.length() < depenetration_min_push:
+		return false
+	return _apply_translation_to_hand_and_held(translation, false)
+
+
+func _get_elbow_obstruction_origin() -> Node3D:
+	if is_instance_valid(_elbow_obstruction):
+		return _elbow_obstruction
+	if _parent_body == null:
+		return null
+	var node_name := "LeftElbowObstruction" if hand == 0 else "RightElbowObstruction"
+	_elbow_obstruction = _parent_body.find_child(node_name, true, false) as Node3D
+	return _elbow_obstruction
+
+
+func _get_hand_obstruction_target() -> Node3D:
+	if is_instance_valid(_hand_obstruction_to):
+		return _hand_obstruction_to
+	_hand_obstruction_to = get_node_or_null("ObstructionMarkerTo") as Node3D
+	if _hand_obstruction_to == null:
+		_hand_obstruction_to = self
+	return _hand_obstruction_to
+
+
 func _resolve_post_origin_depenetration() -> bool:
 	if mode == CollisionHandMode.DISABLED or depenetration_iterations <= 0:
 		return false
 	if not get_has_tracking_data():
 		return false
 
-	var moved := false
+	var moved := _resolve_elbow_line_obstruction()
 	for _iteration in depenetration_iterations:
 		var push := _peek_depenetration_push()
 		if push.length_squared() < 0.000001:
