@@ -187,10 +187,10 @@ var visual_hold_grip : float = 1.0
 ## Extra separation applied along each depenetration contact normal.
 @export var depenetration_margin_epsilon : float = 0.02
 
-## Physics layers to resolve against (defaults to static world + doors; not teleport blockers).
+## Physics layers to resolve against (defaults to static world + thin colliders; not teleport blockers).
 @export_flags_3d_physics var depenetration_collision_mask : int = 257
 
-## Held-item depenetration for jointed pickups (door frame + door panel only).
+## Held-item depenetration for jointed pickups (static frame + swinging panel only).
 @export_flags_3d_physics var held_depenetration_collision_mask : int = 384
 
 ## Maximum translation applied per depenetration iteration.
@@ -336,7 +336,7 @@ var _hand_obstruction_to: Node3D
 
 const ARM_DEPENETRATION_GROUP_LEFT := "arm_depenetration_left"
 const ARM_DEPENETRATION_GROUP_RIGHT := "arm_depenetration_right"
-const _DOOR_PHYSICS_LAYER := 256
+const _PANEL_PHYSICS_LAYER := 256
 const _ELBOW_LINE_MIN_PAST := 0.04
 const _ELBOW_LINE_MIN_FACE_DOT := 0.2
 
@@ -498,8 +498,8 @@ func _is_multi_body_held_pickup() -> bool:
 
 
 func _has_held_for_teleport() -> bool:
-	# Hinged doors must stay on their hinge — never glue/freeze them to the hand.
-	if _pickup != null and _pickup.has_method("is_hinged_hold") and _pickup.is_hinged_hold():
+	# Bodies on a HingeJoint3D must stay on that joint — never glue/freeze them to the hand.
+	if _pickup != null and _pickup.has_method("is_jointed_hold") and _pickup.is_jointed_hold():
 		return false
 	return _pickup != null and _pickup._picked_up is RigidBody3D
 
@@ -1100,16 +1100,16 @@ func _process(_delta: float) -> void:
 func _should_sync_hand_mesh_to_grab() -> bool:
 	if _pickup == null:
 		return false
-	# Door handles: keep the visible hand on the grab while physics stays tracked.
-	if _pickup.has_method("is_hinged_hold") and _pickup.is_hinged_hold():
+	# Jointed grabs: keep the visible hand on the grab while physics stays tracked.
+	if _pickup.has_method("is_jointed_hold") and _pickup.is_jointed_hold():
 		return true
 	# Support grip: mesh lock (existing — do not change conditions).
 	if _pickup.has_method("is_secondary_support_hold") \
 			and _pickup.is_secondary_support_hold():
 		return true
 	# Exclusive sliding grip: same visual glue so soft-joint drift isn't visible.
-	return _pickup.has_method("is_reload_grip_hold") \
-			and _pickup.is_reload_grip_hold()
+	return _pickup.has_method("is_sliding_grip_hold") \
+			and _pickup.is_sliding_grip_hold()
 
 
 func _capture_hand_mesh_grab_lock() -> void:
@@ -1126,22 +1126,37 @@ func _capture_hand_mesh_grab_lock() -> void:
 	_hand_mesh.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 
 
-## Seat the visible hand exactly on the grab pose (no offset drift).
-## Used for door handles. Not for exclusive sliding grips — use begin_reload_grab_mesh_lock.
-func begin_hinged_hand_mesh_lock() -> void:
+## Seat the visible hand so the middle metacarpal sits on the grab pose
+## (same convention as the editor grab-point preview). Identity local put
+## the mesh root on the handle, which sat the palm off the bar.
+func begin_jointed_hand_mesh_lock() -> void:
 	if not _hand_mesh or not _pickup or not is_instance_valid(_pickup._picked_up):
 		return
 	if not _pickup.get_picked_up_grab_point():
 		return
-	_hand_mesh_grab_local = Transform3D()
+	_hand_mesh_grab_local = _metacarpal_seat_local()
 	_hand_mesh_grab_locked = true
 	_hand_mesh.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	_sync_hand_mesh_to_grab_point()
 
 
+func _metacarpal_seat_local() -> Transform3D:
+	var skeleton := _get_skeleton_node(_hand_mesh)
+	if skeleton == null:
+		return Transform3D()
+	var bone_name := "LeftMiddleMetacarpal" if hand == 0 else "RightMiddleMetacarpal"
+	var bone_idx := skeleton.find_bone(bone_name)
+	if bone_idx < 0:
+		return Transform3D()
+	var orient := Basis.from_euler(Vector3(0.5 * PI, 0.5 * -PI, 0.0)) if hand == 0 \
+		else Basis.from_euler(Vector3(0.5 * PI, PI, 0.5 * PI))
+	var bone_transform: Transform3D = skeleton.get_bone_global_pose(bone_idx)
+	return (bone_transform * Transform3D(orient, Vector3.ZERO)).inverse()
+
+
 ## Exclusive sliding: glue visible hand like support — capture mesh vs grab after palm seating
 ## so the metacarpal lands on the grab (editor preview), not the mesh root.
-func begin_reload_grab_mesh_lock() -> void:
+func begin_sliding_grab_mesh_lock() -> void:
 	if not _hand_mesh or not _pickup or not is_instance_valid(_pickup._picked_up):
 		return
 	if not _pickup.get_picked_up_grab_point():
@@ -1317,11 +1332,11 @@ func _physics_process(delta):
 		if grab_point:
 			distance = _last_tracked_transform.origin.distance_to(grab_point.global_position)
 			
-		# Drop if too far. Hinged doors seat the hand on the handle while the
+		# Drop if too far. Jointed holds seat the hand on the grab while the
 		# tracked controller stays farther away — use a wider leash so the grab
 		# is not instantly cancelled.
 		var max_drop := drop_distance
-		if _pickup.has_method("is_hinged_hold") and _pickup.is_hinged_hold():
+		if _pickup.has_method("is_jointed_hold") and _pickup.is_jointed_hold():
 			max_drop = maxf(drop_distance, 2.0)
 		if distance > max_drop:
 			if _pickup and _pickup.picked_up:
@@ -1404,7 +1419,8 @@ func _physics_process(delta):
 		if _parent_angular_velocity_cooldown > 0:
 			parent_angular_velocity = Vector3.ZERO
 			_parent_angular_velocity_cooldown -= 1
-		XRT2Helper.apply_force_to_target(delta, self, target.origin,
+		var track_origin := _clamp_tracking_for_panels(target.origin)
+		XRT2Helper.apply_force_to_target(delta, self, track_origin,
 			1.0, parent_linear_velocity, parent_angular_velocity, parent_global_position
 		)
 
@@ -1443,11 +1459,12 @@ func _physics_process(delta):
 	if _hand_mesh.visible and not (_pickup and is_instance_valid(_pickup._picked_up)):
 		_hand_mesh.scale = Vector3(world_scale, world_scale, world_scale)
 
-func _integrate_forces(_state: PhysicsDirectBodyState3D) -> void:
+func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	if mode != CollisionHandMode.COLLIDE:
 		return
 	if freeze or _is_depenetration_active():
 		return
+	_reject_panel_penetration(state)
 	if not _ghost_mesh or not _ghost_skeleton:
 		return
 	if not _is_valid_tracked_target(_shape_update_target):
@@ -1676,18 +1693,18 @@ func _unfreeze_teleported_held_bodies() -> void:
 
 
 ## After snap/teleport only (caller is post-origin recovery). A hand can sit
-## fully on the far side of a hinged door without overlapping it; overlap
-## depenetration then no-ops and tracking yanks the panel.
+## fully on the far side of a thin swinging panel without overlapping it;
+## overlap depenetration then no-ops and tracking yanks the panel.
 ##
 ## The authored elbow marker lives on the IK arm, which follows the physics
 ## hand — after a forward teleport both ends can already be on the far side,
 ## so the elbow ray misses. Try elbow first (shorter, more conservative),
-## then the head (stays on the body side). Door layer only; toward-head
-## like overlap. Guns keep colliding.
+## then the head (stays on the body side). Panel layer only; toward-head
+## like overlap. Held items keep colliding.
 func _resolve_elbow_line_obstruction() -> bool:
 	if _is_pickup_orienting():
 		return false
-	if _pickup != null and _pickup.has_method("is_hinged_hold") and _pickup.is_hinged_hold():
+	if _pickup != null and _pickup.has_method("is_jointed_hold") and _pickup.is_jointed_hold():
 		return false
 
 	var to_node := _get_hand_obstruction_target()
@@ -1696,7 +1713,7 @@ func _resolve_elbow_line_obstruction() -> bool:
 	var to := to_node.global_position
 
 	var elbow := _get_elbow_obstruction_origin()
-	if elbow != null and _try_door_line_obstruction(elbow.global_position, to):
+	if elbow != null and _try_panel_line_obstruction(elbow.global_position, to):
 		return true
 
 	var head := _get_player_reference_position()
@@ -1704,12 +1721,12 @@ func _resolve_elbow_line_obstruction() -> bool:
 		return false
 	if elbow != null and head.distance_squared_to(elbow.global_position) < 0.01:
 		return false
-	return _try_door_line_obstruction(head, to)
+	return _try_panel_line_obstruction(head, to)
 
 
-func _try_door_line_obstruction(from: Vector3, to: Vector3) -> bool:
-	var door_mask := depenetration_collision_mask & _DOOR_PHYSICS_LAYER
-	if door_mask == 0:
+func _try_panel_line_obstruction(from: Vector3, to: Vector3) -> bool:
+	var panel_mask := depenetration_collision_mask & _PANEL_PHYSICS_LAYER
+	if panel_mask == 0:
 		return false
 
 	var span := to - from
@@ -1721,7 +1738,7 @@ func _try_door_line_obstruction(from: Vector3, to: Vector3) -> bool:
 		return false
 
 	var query := PhysicsRayQueryParameters3D.create(from, to)
-	query.collision_mask = door_mask
+	query.collision_mask = panel_mask
 	query.collide_with_areas = false
 	query.exclude = _get_depenetration_exclude_rids()
 	var hit := space.intersect_ray(query)
@@ -1738,7 +1755,7 @@ func _try_door_line_obstruction(from: Vector3, to: Vector3) -> bool:
 		hit_normal = -dir
 	else:
 		hit_normal = hit_normal.normalized()
-	# Park on the body side of the face we hit, not a graze along the leaf.
+	# Park on the body side of the face we hit, not a graze along the panel.
 	if hit_normal.dot(from - hit_pos) <= 0.0:
 		hit_normal = -hit_normal
 	if hit_normal.dot(from - hit_pos) <= 0.0:
@@ -1747,11 +1764,148 @@ func _try_door_line_obstruction(from: Vector3, to: Vector3) -> bool:
 		return false
 
 	var parked: Vector3 = hit_pos + hit_normal * maxf(depenetration_margin_epsilon, 0.04)
-	# Do not use overlap's 1m clamp — the hand can be a full teleport past the leaf.
+	# Do not use overlap's 1m clamp — the hand can be a full teleport past the panel.
 	var translation := _constrain_push_toward_player(parked - to, to)
 	if translation.length() < depenetration_min_push:
 		return false
 	return _apply_translation_to_hand_and_held(translation, false)
+
+
+## Keep the physics palm on this side of a thin swinging panel. Transfer tracking
+## force to the panel only when the controller is actually through it — a panel
+## bouncing into a still hand must not get extra push.
+func _clamp_tracking_for_panels(controller_origin: Vector3) -> Vector3:
+	if _has_held_for_teleport():
+		return controller_origin
+	if _pickup and is_instance_valid(_pickup._picked_up):
+		return controller_origin
+
+	var info := _find_blocking_panel(controller_origin)
+	if info.is_empty():
+		return controller_origin
+
+	var panel: RigidBody3D = info.get("body") as RigidBody3D
+	var outward: Vector3 = info.normal
+	if panel != null and is_instance_valid(panel):
+		outward = _panel_outward(panel, controller_origin, outward)
+	var desired: Vector3 = controller_origin - global_position
+	var into := -desired.dot(outward)
+	var clamped := controller_origin
+	if into > 0.0:
+		clamped = global_position + desired + outward * into
+		if (clamped - global_position).dot(outward) < 0.0:
+			clamped = global_position + outward * 0.012
+
+	if panel != null and is_instance_valid(panel) and not panel.freeze \
+			and _controller_is_through_panel(panel, controller_origin, outward):
+		var through := maxf(0.0, (controller_origin - info.surface).dot(-outward))
+		var press := clampf(through * 260.0, 0.0, 140.0)
+		if press > 10.0:
+			panel.apply_force(-outward * press, global_position - panel.global_position)
+			panel.sleeping = false
+
+	return clamped
+
+
+func _panel_outward(panel: RigidBody3D, controller: Vector3, hinted: Vector3) -> Vector3:
+	var axis := panel.global_basis.x.normalized()
+	var ctrl_d := (controller - panel.global_position).dot(axis)
+	var hand_d := (global_position - panel.global_position).dot(axis)
+	var near := 0.0
+	if absf(ctrl_d) < 0.05 or hand_d * ctrl_d < 0.0:
+		near = -signf(ctrl_d) if absf(ctrl_d) > 0.001 else signf(hand_d)
+	else:
+		near = signf(ctrl_d)
+	if is_zero_approx(near):
+		near = 1.0 if hinted.dot(axis) >= 0.0 else -1.0
+	return axis * near
+
+
+func _controller_is_through_panel(panel: RigidBody3D, controller: Vector3, outward: Vector3) -> bool:
+	var axis := panel.global_basis.x.normalized()
+	if axis.dot(outward) < 0.0:
+		axis = -axis
+	var hand_d := (global_position - panel.global_position).dot(axis)
+	var ctrl_d := (controller - panel.global_position).dot(axis)
+	if hand_d * ctrl_d < 0.0:
+		return true
+	return absf(ctrl_d) < 0.05
+
+
+func _panel_exclude_rids() -> Array[RID]:
+	var exclude: Array[RID] = [get_rid()]
+	if _parent_body:
+		exclude.append(_parent_body.get_rid())
+	return exclude
+
+
+func _panel_rest_info() -> Dictionary:
+	if _palm_collision_shape == null or _palm_collision_shape.shape == null:
+		return {}
+	var space := get_world_3d().direct_space_state if get_world_3d() else null
+	if space == null:
+		return {}
+	var params := PhysicsShapeQueryParameters3D.new()
+	params.shape = _palm_collision_shape.shape
+	params.transform = _palm_collision_shape.global_transform
+	params.collision_mask = _PANEL_PHYSICS_LAYER
+	params.collide_with_areas = false
+	params.exclude = _panel_exclude_rids()
+	return space.get_rest_info(params)
+
+
+func _find_blocking_panel(controller_origin: Vector3) -> Dictionary:
+	var rest := _panel_rest_info()
+	if not rest.is_empty():
+		var rest_body = instance_from_id(rest.get("collider_id", 0))
+		if rest_body is RigidBody3D:
+			return {
+				"body": rest_body,
+				"normal": rest.normal,
+				"surface": rest.point
+			}
+
+	var space := get_world_3d().direct_space_state if get_world_3d() else null
+	if space == null:
+		return {}
+
+	var ray := PhysicsRayQueryParameters3D.create(global_position, controller_origin)
+	ray.collision_mask = _PANEL_PHYSICS_LAYER
+	ray.collide_with_areas = false
+	ray.exclude = _panel_exclude_rids()
+	var hit := space.intersect_ray(ray)
+	if not hit.is_empty() and hit.collider is RigidBody3D:
+		return {
+			"body": hit.collider,
+			"normal": hit.normal,
+			"surface": hit.position
+		}
+	return {}
+
+
+func _reject_panel_penetration(state: PhysicsDirectBodyState3D) -> void:
+	if _has_held_for_teleport():
+		return
+	if _pickup and is_instance_valid(_pickup._picked_up):
+		return
+
+	var rest := _panel_rest_info()
+	if rest.is_empty():
+		return
+
+	var n: Vector3 = rest.normal
+	var rest_body = instance_from_id(rest.get("collider_id", 0))
+	if rest_body is RigidBody3D:
+		n = _panel_outward(rest_body, _last_tracked_transform.origin, n)
+	if n.length_squared() < 0.0001:
+		return
+	n = n.normalized()
+	var into := -state.linear_velocity.dot(n)
+	if into > 0.0:
+		state.linear_velocity += n * into
+	var xform := state.transform
+	xform.origin += n * 0.02
+	state.transform = xform
 
 
 func _get_elbow_obstruction_origin() -> Node3D:
@@ -1800,7 +1954,7 @@ func _peek_depenetration_push() -> Vector3:
 	var push := Vector3.ZERO
 	push += _compute_hand_collision_shapes_push()
 	# Arm segment queries are the heavy path; skip while holding — the held
-	# body queries cover door/wall penetration for the held body itself.
+	# body queries cover panel/wall penetration for the held body itself.
 	if not _has_held_for_teleport():
 		push += _compute_arm_segment_depenetration_push()
 	for body in _get_held_depenetration_bodies():

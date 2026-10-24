@@ -157,9 +157,9 @@ var _orient_collision_restore : Dictionary = {}
 ## Set during primary pickup; soft-joint reseat + settle after picked_up.emit.
 var _glue_primary_after_pickup : bool = false
 
-# Door/frame layers to ignore on simple single-body held items while gripped.
-# Static world + teleport block + door — stripped while held to stop physics jitter
-# against props and door frames; post-teleport depenetration handles doors.
+# Environment layers to ignore on simple single-body held items while gripped.
+# Static world + teleport block + thin colliders — stripped while held to stop
+# physics jitter against props and frames; post-teleport depenetration handles the rest.
 const HELD_ENVIRONMENT_COLLISION_MASK := 385
 const PICKUP_ORIENT_TWEEN_DURATION := 0.05
 var _held_environment_mask_restore : Dictionary = {}
@@ -320,7 +320,10 @@ func pickup_object(which : PhysicsBody3D):
 func apply_visual_hold(which : PhysicsBody3D) -> void:
 	if not which or not _xr_collision_hand:
 		return
-	var grab_point = _get_closest_grabpoint(which, global_position, true)
+	# Do not use _get_closest_grabpoint here. That path runs pickup steal-prevention
+	# and rejects every useable grip on a remotely-held item, so this used to return
+	# without setting visual_hold_active (open hand on witnesses).
+	var grab_point = _get_visual_hold_grabpoint(which)
 	if not grab_point:
 		return
 	_xr_collision_hand.visual_hold_active = true
@@ -330,6 +333,34 @@ func apply_visual_hold(which : PhysicsBody3D) -> void:
 	_xr_collision_hand.open_finger_poses = grab_point.open_finger_poses
 	if _xr_collision_hand._hand_mesh:
 		_xr_collision_hand._hand_mesh.transform = Transform3D()
+
+
+## Closest grip for a remote replica. Ignores "already held" pickup rules.
+func _get_visual_hold_grabpoint(body : PhysicsBody3D) -> XRT2GrabPoint:
+	if body == null:
+		return null
+	var is_left_hand := _is_left_hand()
+	var grab_points: Array[XRT2GrabPoint] = []
+	_collect_grab_points(_get_assembly_root(body), grab_points)
+	var closest_useable: XRT2GrabPoint = null
+	var useable_dist := 9999.99
+	var closest: XRT2GrabPoint = null
+	var closest_dist := 9999.99
+	for grab_point in grab_points:
+		if grab_point == null:
+			continue
+		if is_left_hand and not grab_point.left_hand:
+			continue
+		if not is_left_hand and not grab_point.right_hand:
+			continue
+		var dist := (grab_point.get_detection_origin() - global_position).length_squared()
+		if grab_point.useable and dist < useable_dist:
+			closest_useable = grab_point
+			useable_dist = dist
+		if dist < closest_dist:
+			closest = grab_point
+			closest_dist = dist
+	return closest_useable if closest_useable else closest
 
 
 ## Clear a visual-only hold (remote replica released or returned to a snap zone).
@@ -387,33 +418,33 @@ func _rebuild_held_joint(which: PhysicsBody3D) -> void:
 	_joint.node_a = _xr_collision_hand.get_path()
 
 	var joint_target: PhysicsBody3D = which
-	var brace_to_weapon := false
+	var brace_to_root := false
 	# Only exclusive sliding grips on multi-grip assemblies (useable primary present).
 	# Simple pickables that inherit exclusive must not get the soft sliding spring.
-	if _is_weapon_reload_grip(which, _grab_point):
+	if _is_exclusive_sliding_grip(which, _grab_point):
 		var root := _get_assembly_root(which)
 		# Exclusive sliding grip without a support grip: spring to the assembly root.
 		# Exclusive sliding grip with a support grip: stay on the child carrier body.
 		if root is PhysicsBody3D and root != which \
 				and not _assembly_has_secondary_brace(root as PhysicsBody3D):
 			joint_target = root as PhysicsBody3D
-			brace_to_weapon = true
+			brace_to_root = true
 
 	_joint.node_b = joint_target.get_path()
-	# Default 6DOF locks linear+angular axes. That overconstrains a hinged door
-	# (panel cannot swing) so configure a soft positional spring instead.
-	if _is_hinged_body(which):
-		_configure_hinged_grab_joint(_joint)
-	elif brace_to_weapon:
+	# Default 6DOF locks linear+angular axes. That overconstrains a body still
+	# attached to a HingeJoint3D (panel cannot swing), so use a soft positional spring.
+	if _is_jointed_body(which):
+		_configure_jointed_grab_joint(_joint)
+	elif brace_to_root:
 		# Soft sliding spring: lateral aim moves the root; along-rail stretch stays free.
-		_configure_reload_forend_joint(_joint)
-	elif _is_weapon_reload_grip(which, _grab_point):
+		_configure_sliding_grip_joint(_joint)
+	elif _is_exclusive_sliding_grip(which, _grab_point):
 		# Exclusive grip on a child body: soft spring so the palm can travel the rail.
-		_configure_reload_forend_joint(_joint)
+		_configure_sliding_grip_joint(_joint)
 
 
 ## Exclusive sliding grip on a multi-grip assembly (not simple pickables).
-func _is_weapon_reload_grip(body: PhysicsBody3D, grab_point: XRT2GrabPoint) -> bool:
+func _is_exclusive_sliding_grip(body: PhysicsBody3D, grab_point: XRT2GrabPoint) -> bool:
 	if body == null or grab_point == null:
 		return false
 	if not grab_point.exclusive or grab_point.useable:
@@ -433,8 +464,8 @@ func _assembly_has_secondary_brace(assembly_root: PhysicsBody3D) -> bool:
 	return false
 
 
-## Soft positional spring only — free rotation so the door hinge can swing.
-func _configure_hinged_grab_joint(joint: Generic6DOFJoint3D) -> void:
+## Soft positional spring only — free rotation so a HingeJoint3D can still swing.
+func _configure_jointed_grab_joint(joint: Generic6DOFJoint3D) -> void:
 	if joint == null:
 		return
 	const stiffness := 320.0
@@ -470,7 +501,7 @@ func _configure_hinged_grab_joint(joint: Generic6DOFJoint3D) -> void:
 
 
 ## Soft spring for exclusive sliding grips jointed to the assembly root.
-func _configure_reload_forend_joint(joint: Generic6DOFJoint3D) -> void:
+func _configure_sliding_grip_joint(joint: Generic6DOFJoint3D) -> void:
 	if joint == null:
 		return
 	# Strong enough to aim the assembly; soft enough that along-rail travel isn't locked.
@@ -556,12 +587,12 @@ func _pickup_object_internal(which : PhysicsBody3D, ignore_grab_distance : bool)
 			
 			dest_transform.basis = dest_transform.basis.orthonormalized()
 
-			var is_hinged := _is_hinged_body(which)
-			var is_hand_to_object := (not is_hinged) and _should_snap_hand_to_grab(which, _grab_point)
-			if is_hinged:
-				# Keep the hinge: do not teleport the panel to the palm, and do not
-				# yank the physics hand onto authored handle transforms (often off).
-				# Soft spring joint + mesh lock handle interaction instead.
+			var is_jointed := _is_jointed_body(which)
+			var is_hand_to_object := (not is_jointed) and _should_snap_hand_to_grab(which, _grab_point)
+			if is_jointed:
+				# Keep the HingeJoint3D: do not teleport the panel to the palm, and do not
+				# yank the physics hand onto authored grab transforms (often off).
+				# Soft spring joint + mesh lock handle the interaction instead.
 				pass
 			elif is_hand_to_object:
 				# Exclusive sliding grip: seat with authored palm (same offset primaries use).
@@ -569,7 +600,7 @@ func _pickup_object_internal(which : PhysicsBody3D, ignore_grab_distance : bool)
 				# Simple pickables may inherit exclusive — only multi-grip sliding seats.
 				_place_hand_at_grab_point(
 					dest_transform,
-					_is_weapon_reload_grip(which, _grab_point)
+					_is_exclusive_sliding_grip(which, _grab_point)
 				)
 			else:
 				_place_object_at_hand_attachment(which)
@@ -578,14 +609,14 @@ func _pickup_object_internal(which : PhysicsBody3D, ignore_grab_distance : bool)
 
 			which.add_collision_exception_with(_xr_collision_hand)
 			# Sliding grip springs to the assembly root — keep the palm from colliding with it.
-			if _is_weapon_reload_grip(which, _grab_point):
+			if _is_exclusive_sliding_grip(which, _grab_point):
 				var root := _get_assembly_root(which)
 				if root is PhysicsBody3D and root != which \
 						and not _assembly_has_secondary_brace(root as PhysicsBody3D):
 					(root as PhysicsBody3D).add_collision_exception_with(_xr_collision_hand)
 					_xr_collision_hand.add_collision_exception_with(root)
 
-			if is_hinged:
+			if is_jointed:
 				if _xr_collision_hand._hand_mesh:
 					_xr_collision_hand._hand_mesh.transform = Transform3D()
 				_orienting_pickup = false
@@ -697,14 +728,14 @@ func _pickup_object_internal(which : PhysicsBody3D, ignore_grab_distance : bool)
 
 	# After picked_up handlers clear mesh lock, re-apply grab visuals.
 	if _xr_collision_hand:
-		if _is_hinged_body(which) \
-				and _xr_collision_hand.has_method("begin_hinged_hand_mesh_lock"):
-			# Doors: mesh root sits exactly on the handle grab.
-			_xr_collision_hand.begin_hinged_hand_mesh_lock()
-		elif _is_weapon_reload_grip(which, _grab_point) \
-				and _xr_collision_hand.has_method("begin_reload_grab_mesh_lock"):
+		if _is_jointed_body(which) \
+				and _xr_collision_hand.has_method("begin_jointed_hand_mesh_lock"):
+			# Jointed bodies: mesh root sits exactly on the grab.
+			_xr_collision_hand.begin_jointed_hand_mesh_lock()
+		elif _is_exclusive_sliding_grip(which, _grab_point) \
+				and _xr_collision_hand.has_method("begin_sliding_grab_mesh_lock"):
 			# Exclusive sliding grips only — not simple pickables that inherit exclusive.
-			_xr_collision_hand.begin_reload_grab_mesh_lock()
+			_xr_collision_hand.begin_sliding_grab_mesh_lock()
 
 	if _glue_primary_after_pickup:
 		_glue_primary_after_pickup = false
@@ -712,6 +743,13 @@ func _pickup_object_internal(which : PhysicsBody3D, ignore_grab_distance : bool)
 			_place_object_at_hand_attachment(_picked_up)
 		if _xr_collision_hand and _xr_collision_hand.has_method("begin_pickup_settle"):
 			_xr_collision_hand.begin_pickup_settle()
+
+	# Brace/orient already strips world+thin-collider layers after the tween.
+	# Primary one-hand holds never entered that path, so a long held item could
+	# still wedge in a frame. Same restore-on-drop as brace. Skip jointed
+	# bodies and in-progress orient.
+	if _xr_collision_hand and not _orienting_pickup and not _is_jointed_body(which):
+		_apply_held_environment_collision_mask(which)
 
 
 ## Drop object we're currently holding
@@ -782,9 +820,9 @@ func drop_held_object() -> void:
 				var rb: RigidBody3D = _picked_up
 				if _is_stashed_in_snap_zone(rb):
 					pass
-				elif _is_hinged_body(rb):
+				elif _is_jointed_body(rb):
 					# Soft-spring already drove the panel. Controller throw is in
-					# tracker space and often fights / inverts hinge swing on release.
+					# tracker space and often fights / inverts joint swing on release.
 					rb.freeze = false
 					rb.linear_damp = 0.0
 					rb.angular_damp = 0.0
@@ -803,7 +841,7 @@ func drop_held_object() -> void:
 		_picked_up.collision_mask = _original_collision_mask
 
 		if _picked_up is RigidBody3D and not _is_stashed_in_snap_zone(_picked_up):
-			if _is_hinged_body(_picked_up):
+			if _is_jointed_body(_picked_up):
 				_picked_up.freeze_mode = _original_freeze_mode
 				_picked_up.freeze = false
 			else:
@@ -824,7 +862,7 @@ func drop_held_object() -> void:
 	if other:
 		# If it isn't already primary, this is now our primary
 		other._is_primary = true
-		# Brace/orient strips floor/door from the held mask and stores the
+		# Brace/orient strips floor/thin-collider bits from the held mask and stores the
 		# pre-strip values on THIS hand. Transfer so the last hand to drop
 		# can restore world collision (otherwise the held body falls through floors).
 		_transfer_held_environment_collision_mask(other)
@@ -1230,15 +1268,15 @@ func _process(_delta):
 	var closest_is_secondary := _closest_object \
 			and is_instance_valid(_closest_object.body) \
 			and _is_secondary_support_grab(_closest_object.body, _closest_object.grab_point)
-	var closest_is_reload := _closest_object \
+	var closest_is_sliding := _closest_object \
 			and is_instance_valid(_closest_object.body) \
-			and _is_reload_grip(_closest_object.body, _closest_object.grab_point)
-	var closest_is_weapon_assist := closest_is_secondary or closest_is_reload
+			and _is_assist_sliding_grip(_closest_object.body, _closest_object.grab_point)
+	var closest_is_assist_grip := closest_is_secondary or closest_is_sliding
 
 	# Don't allow a new grab until both actions release after a drop.
 	# Exception: assist grips on an assembly the other hand already holds — grip often
 	# stays down after a trigger-release bounce; blocking forever feels broken.
-	if _block_grab_until_release and closest_is_weapon_assist:
+	if _block_grab_until_release and closest_is_assist_grip:
 		_block_grab_until_release = false
 
 	if _block_grab_until_release:
@@ -1256,7 +1294,7 @@ func _process(_delta):
 			_was_drop_pressed = grip_now
 			_was_pick_pressed = pick_now
 		elif _is_secondary_support_grab(_picked_up, _grab_point) \
-				or _is_weapon_reload_grip(_picked_up, _grab_point):
+				or _is_exclusive_sliding_grip(_picked_up, _grab_point):
 			# Support / exclusive sliding: either grip or trigger keeps the hold.
 			# Releasing only the button that started the grab (while the other stays
 			# down) used to drop immediately and soft-lock re-grab.
@@ -1275,14 +1313,14 @@ func _process(_delta):
 			if not _is_grab:
 				drop_held_object()
 		else:
-			# Hold mode (door knobs): drop when the button that started the grab releases.
+			# Hold mode (momentary grabs): drop when the button that started the grab releases.
 			if _pick_input == grab_action and not grip_now:
 				drop_held_object()
 			elif _pick_input == pick_action and not pick_now:
 				drop_held_object()
 			_was_drop_pressed = grip_now
 			_was_pick_pressed = pick_now
-	elif closest_is_weapon_assist:
+	elif closest_is_assist_grip:
 		# Support / exclusive sliding on a held assembly: grip or trigger edge both grab.
 		var was_grip_pressed := _was_drop_pressed
 		var grip_pressed_edge := grip_now and not was_grip_pressed
@@ -1308,7 +1346,7 @@ func _process(_delta):
 		if pick_pressed_edge:
 			_pick_input = pick_action
 			want_pickup = true
-		elif grip_pressed_edge and can_grip_pickup_reload():
+		elif grip_pressed_edge and can_grip_assist_pickup():
 			_pick_input = grab_action
 			want_pickup = true
 
@@ -1385,6 +1423,65 @@ func _is_assembly_held(assembly_root: PhysicsBody3D) -> bool:
 	return false
 
 
+## Server says another player already holds this assembly.
+func _is_held_by_remote_player(assembly_root: PhysicsBody3D) -> bool:
+	var pickable := _find_networked_pickable(assembly_root)
+	if pickable == null or not pickable.has_method("IsHeldByRemotePlayer"):
+		return false
+	return pickable.call("IsHeldByRemotePlayer") as bool
+
+
+func _find_networked_pickable(body: Node) -> Node:
+	if body == null or not is_instance_valid(body):
+		return null
+	var networked := body.get_node_or_null("NetworkedNode")
+	if networked:
+		for child in networked.get_children():
+			if child.has_method("IsHeldByRemotePlayer"):
+				return child
+	for child in body.get_children():
+		if child.has_method("IsHeldByRemotePlayer"):
+			return child
+		var nested := child.get_node_or_null("NetworkedNode")
+		if nested:
+			for nchild in nested.get_children():
+				if nchild.has_method("IsHeldByRemotePlayer"):
+					return nchild
+	return null
+
+
+## Closest primary/useable grip on an unheld multi-grip assembly. Distance is
+## ignored so a highlight on any part of the assembly still stages the primary snap.
+func _get_unheld_primary_grabpoint(
+	assembly_root: PhysicsBody3D, hand_position: Vector3
+) -> XRT2GrabPoint:
+	if assembly_root == null:
+		return null
+	if _is_assembly_held(assembly_root) or _is_held_by_remote_player(assembly_root):
+		return null
+
+	var is_left_hand := _is_left_hand()
+	var grab_points: Array[XRT2GrabPoint] = []
+	_collect_grab_points(assembly_root, grab_points)
+
+	var closest_grab_point: XRT2GrabPoint = null
+	var closest_dist := 9999.99
+	for grab_point in grab_points:
+		if grab_point == null or not grab_point.useable:
+			continue
+		if is_left_hand and not grab_point.left_hand:
+			continue
+		if not is_left_hand and not grab_point.right_hand:
+			continue
+		if _is_grab_point_blocked(grab_point):
+			continue
+		var dist := (grab_point.get_detection_origin() - hand_position).length_squared()
+		if dist < closest_dist:
+			closest_grab_point = grab_point
+			closest_dist = dist
+	return closest_grab_point
+
+
 func _assembly_has_useable_grab_point(assembly_root: PhysicsBody3D) -> bool:
 	var grab_points: Array[XRT2GrabPoint] = []
 	_collect_grab_points(assembly_root, grab_points)
@@ -1416,7 +1513,10 @@ func _grab_point_allowed_for_pickup(
 	var other_primary := _other_hand_primary_grab_point(assembly_root)
 
 	if grab_point.useable:
-		# Primaries only while nobody holds a primary (world + force-pickup draws).
+		# Primaries only while this assembly is not already held.
+		# Remote network-holds block steal; local primary blocks a second primary.
+		if _is_held_by_remote_player(assembly_root):
+			return false
 		return other_primary == null
 
 	# Exclusive sliding grip: only once the assembly is already held.
@@ -1442,13 +1542,13 @@ func _is_opposite_secondary_for_primary(
 
 ## Pick one assist grip (support vs exclusive sliding) so highlight matches selection.
 ## Prefer support whenever it is reachable; exclusive is only used when support is not.
-func _pick_weapon_assist_grabpoint(
+func _pick_assist_grabpoint(
 	assembly_root: PhysicsBody3D, hand_position: Vector3
 ) -> XRT2GrabPoint:
 	var support := _find_secondary_support_grabpoint(assembly_root, hand_position)
 	if support != null:
 		return support
-	return _find_reload_grabpoint(assembly_root, hand_position)
+	return _find_sliding_grabpoint(assembly_root, hand_position)
 
 
 func _update_closest_object() -> void:
@@ -1524,9 +1624,9 @@ func _is_secondary_support_grab(body : PhysicsBody3D, grab_point : XRT2GrabPoint
 	return _body_has_useable_grab_point(_get_assembly_root(body))
 
 
-## True while holding a body still attached to a hinge (physics doors).
-func is_hinged_hold() -> bool:
-	return is_instance_valid(_picked_up) and _is_hinged_body(_picked_up)
+## True while holding a body still attached to a HingeJoint3D.
+func is_jointed_hold() -> bool:
+	return is_instance_valid(_picked_up) and _is_jointed_body(_picked_up)
 
 
 ## Stored loadout item currently inside a snap zone. A loose copy of the same
@@ -1563,7 +1663,7 @@ func _is_stashed_in_snap_zone(body: PhysicsBody3D) -> bool:
 	return false
 
 
-## True when an empty-hand proximity target is available (doors, props, etc.).
+## True when an empty-hand proximity target is available (world pickups, props, etc.).
 ## Loadout draw must not steal grip when this is true.
 func has_closest_pickup() -> bool:
 	return _closest_object != null and is_instance_valid(_closest_object.body)
@@ -1577,24 +1677,52 @@ func get_closest_pickup_body() -> PhysicsBody3D:
 
 
 ## Support or exclusive sliding: hand moves to the grab, object stays put.
-## Hinged doors are handled separately (no seating; soft spring joint).
+## Bodies on a HingeJoint3D are handled separately (no seating; soft spring joint).
 func _should_snap_hand_to_grab(body : PhysicsBody3D, grab_point : XRT2GrabPoint) -> bool:
 	if _is_secondary_support_grab(body, grab_point):
 		return true
 	if body == null or grab_point == null:
 		return false
-	# Hinged seating is explicit in _pickup_object_internal — never treat doors
-	# as free pickups (that teleports the panel to the palm).
-	if _is_hinged_body(body):
+	# Jointed seating is explicit in _pickup_object_internal — never treat a
+	# HingeJoint3D body as a free pickup (that teleports the panel to the palm).
+	if _is_jointed_body(body):
 		return true
 	if grab_point.useable or not grab_point.exclusive:
 		return false
 	return _body_has_useable_grab_point(_get_assembly_root(body))
 
 
-## True while this body is still attached to a HingeJoint3D (unlocked doors, etc.).
-## After PhysicsDoorComponent.Break() clears the hinge, this returns false so free pickup works.
-func _is_hinged_body(body : PhysicsBody3D) -> bool:
+## True when the palm would have to go through a HingeJoint3D panel to reach this grab.
+func _is_jointed_grab_through_panel(
+	body: PhysicsBody3D, grab_point: XRT2GrabPoint, hand_position: Vector3
+) -> bool:
+	if grab_point == null or not is_instance_valid(grab_point):
+		return false
+	if not _is_jointed_body(body):
+		return false
+
+	var dest := grab_point.get_detection_origin()
+	var axis := body.global_basis.x
+	var hand_d := (hand_position - body.global_position).dot(axis)
+	var grab_d := (dest - body.global_position).dot(axis)
+	if hand_d * grab_d < 0.0:
+		return true
+
+	var space := body.get_world_3d().direct_space_state if body.get_world_3d() else null
+	if space == null:
+		return false
+	var query := PhysicsRayQueryParameters3D.create(hand_position, dest)
+	query.collision_mask = 256
+	query.collide_with_areas = false
+	var hit := space.intersect_ray(query)
+	if hit.is_empty() or hit.collider != body:
+		return false
+	return hand_position.distance_to(hit.position) + 0.02 < hand_position.distance_to(dest)
+
+
+## True while this body is still attached to a HingeJoint3D. After that joint
+## is removed, this returns false so free pickup works.
+func _is_jointed_body(body : PhysicsBody3D) -> bool:
 	if body == null or not is_instance_valid(body):
 		return false
 	var parent := body.get_parent()
@@ -1602,9 +1730,9 @@ func _is_hinged_body(body : PhysicsBody3D) -> bool:
 		return false
 	for child in parent.get_children():
 		if child is HingeJoint3D:
-			var hinge := child as HingeJoint3D
-			var a = hinge.get_node_or_null(hinge.node_a) if hinge.node_a != NodePath() else null
-			var b = hinge.get_node_or_null(hinge.node_b) if hinge.node_b != NodePath() else null
+			var joint := child as HingeJoint3D
+			var a = joint.get_node_or_null(joint.node_a) if joint.node_a != NodePath() else null
+			var b = joint.get_node_or_null(joint.node_b) if joint.node_b != NodePath() else null
 			if a == body or b == body:
 				return true
 	return false
@@ -1619,7 +1747,7 @@ func _get_grab_point_max_distance(body : PhysicsBody3D, grab_point : XRT2GrabPoi
 
 
 ## Exclusive sliding grip on an assembly already held by another hand.
-func _is_reload_grip(body : PhysicsBody3D, grab_point : XRT2GrabPoint) -> bool:
+func _is_assist_sliding_grip(body : PhysicsBody3D, grab_point : XRT2GrabPoint) -> bool:
 	if body == null or grab_point == null:
 		return false
 	if not grab_point.exclusive or grab_point.useable:
@@ -1636,14 +1764,14 @@ func _is_reload_grip(body : PhysicsBody3D, grab_point : XRT2GrabPoint) -> bool:
 
 ## Used by host code so inventory grip does not steal exclusive sliding or support grips.
 ## Ignores post-drop button block — a free hand on a held assembly must win over force-pickup draw.
-func can_grip_pickup_reload() -> bool:
+func can_grip_assist_pickup() -> bool:
 	if _picked_up:
 		return false
 	if not _closest_object or not is_instance_valid(_closest_object.body):
 		_update_closest_object()
 	if not _closest_object or not is_instance_valid(_closest_object.body):
 		return false
-	if _is_reload_grip(_closest_object.body, _closest_object.grab_point):
+	if _is_assist_sliding_grip(_closest_object.body, _closest_object.grab_point):
 		return true
 	return _is_secondary_support_grab(_closest_object.body, _closest_object.grab_point) \
 			and _other_hand_holds_primary_on_assembly(
@@ -1671,10 +1799,10 @@ func is_secondary_support_hold() -> bool:
 
 
 ## True while holding an exclusive sliding grip.
-func is_reload_grip_hold() -> bool:
+func is_sliding_grip_hold() -> bool:
 	if not _picked_up or not _grab_point:
 		return false
-	return _is_weapon_reload_grip(_picked_up, _grab_point)
+	return _is_exclusive_sliding_grip(_picked_up, _grab_point)
 
 
 ## Support or exclusive sliding grips: highlight only meshes near the grab point.
@@ -1683,6 +1811,8 @@ func _uses_local_grab_highlight(
 ) -> bool:
 	if grab_point == null:
 		return false
+	if _is_jointed_body(body):
+		return true
 	if _is_secondary_support_grab(body, grab_point):
 		return true
 	if grab_point.useable or not grab_point.exclusive:
@@ -1748,12 +1878,6 @@ func _apply_highlight_for_closest(closest: ClosestObject) -> void:
 			and _body_has_useable_grab_point(root):
 		return
 
-	# Doors / hinged props: whole-panel highlight (handle meshes are often
-	# farther than secondary_highlight_radius from the grab-point node).
-	if closest.grab_point and _is_hinged_body(closest.body):
-		_add_highlight(closest.body)
-		return
-
 	_add_highlight(closest.body)
 
 
@@ -1785,10 +1909,17 @@ func _get_closest_grabpoint(body : PhysicsBody3D, hand_position : Vector3, ignor
 				continue
 		if _is_grab_point_blocked(grab_point):
 			continue
+		if _is_jointed_grab_through_panel(assembly_root, grab_point, hand_position):
+			continue
 
 		var dist = (grab_point.get_detection_origin() - hand_position).length_squared()
 		var max_dist := _get_grab_point_max_distance(assembly_root, grab_point)
-		if not ignore_max_distance and dist > max_dist * max_dist:
+		# Unheld multi-grip assemblies: highlight means the primary is reachable.
+		# Do not require the palm to already sit on the grip — pickup snaps it.
+		var unheld_primary := grab_point.useable \
+				and not _is_assembly_held(assembly_root) \
+				and not _is_held_by_remote_player(assembly_root)
+		if not ignore_max_distance and not unheld_primary and dist > max_dist * max_dist:
 			continue
 		if dist < closest_dist:
 			closest_grab_point = grab_point
@@ -1830,7 +1961,7 @@ func _find_secondary_support_grabpoint(
 
 
 ## Exclusive sliding grip on an assembly already held by the other hand.
-func _find_reload_grabpoint(
+func _find_sliding_grabpoint(
 	assembly_root: PhysicsBody3D, hand_position: Vector3
 ) -> XRT2GrabPoint:
 	if assembly_root == null or not _is_assembly_held(assembly_root):
@@ -1952,6 +2083,11 @@ func _get_closest() -> ClosestObject:
 		if _is_snapped_loadout(body):
 			continue
 
+		var assembly_root_for_body := _get_assembly_root(body as PhysicsBody3D)
+		# Server-owned hold: do not highlight or snap a remote player's held item.
+		if _is_held_by_remote_player(assembly_root_for_body):
+			continue
+
 		var by : XRT2Pickup = _get_holder_pickup(body)
 		if by and by._picked_up == body:
 			# Check if it's already been picked up by an exclusive grab on this body.
@@ -1962,16 +2098,23 @@ func _get_closest() -> ClosestObject:
 
 		# Do we have a grab point?
 		var new_dist : float = 9999999.99
-		var assembly_root_for_body := _get_assembly_root(body as PhysicsBody3D)
 		var grab_point = null
 		# While the other hand holds a primary grip, pick one assist grip
 		# (support vs exclusive sliding) — never highlight/select both.
 		# Assemblies without a support grip still resolve exclusive sliding.
 		if _other_hand_holds_primary_on_assembly(assembly_root_for_body):
-			grab_point = _pick_weapon_assist_grabpoint(
+			grab_point = _pick_assist_grabpoint(
 				assembly_root_for_body, global_position
 			)
-		if not grab_point:
+		elif _assembly_has_useable_grab_point(assembly_root_for_body) \
+				and not _is_assembly_held(assembly_root_for_body):
+			# Unheld multi-grip assembly: highlight is primary-only. Trigger snaps that grip.
+			grab_point = _get_unheld_primary_grabpoint(
+				assembly_root_for_body, global_position
+			)
+			if grab_point == null:
+				continue
+		else:
 			grab_point = _get_closest_grabpoint(body, global_position)
 		var target_body : PhysicsBody3D = body
 		if grab_point:
@@ -1989,7 +2132,12 @@ func _get_closest() -> ClosestObject:
 			if by and grab_point.exclusive and by._picked_up == target_body:
 				continue
 
-			new_dist = (global_position - grab_point.get_detection_origin()).length_squared()
+			# Unheld assemblies rank by the body you are overlapping so a
+			# highlight on any part still wins, then snap uses the staged primary.
+			if grab_point.useable and not _is_assembly_held(assembly_root):
+				new_dist = (global_position - target_body.global_position).length_squared()
+			else:
+				new_dist = (global_position - grab_point.get_detection_origin()).length_squared()
 		elif by:
 			# Held by another hand — require an in-range support grip, not body center.
 			continue
@@ -2221,7 +2369,10 @@ func _add_near_grab_point_highlight(
 
 	var search_root: Node3D = assembly_root
 	var radius: float = secondary_highlight_radius
-	if grab_point.exclusive:
+	var grab_body := grab_point.get_parent() as PhysicsBody3D
+	if grab_body != null and _is_jointed_body(grab_body):
+		radius = maxf(secondary_highlight_radius, 0.2)
+	elif grab_point.exclusive:
 		var parent := grab_point.get_parent()
 		if parent is Node3D:
 			search_root = parent
