@@ -157,10 +157,11 @@ var _orient_collision_restore : Dictionary = {}
 ## Set during primary pickup; soft-joint reseat + settle after picked_up.emit.
 var _glue_primary_after_pickup : bool = false
 
-# Environment layers to ignore on simple single-body held items while gripped.
-# Static world + teleport block + thin colliders — stripped while held to stop
-# physics jitter against props and frames; post-teleport depenetration handles the rest.
-const HELD_ENVIRONMENT_COLLISION_MASK := 385
+# Door + teleport-block layers stripped while gripped so a held body does not
+# wedge in a swinging panel or a teleport volume. Static world stays on so the
+# body stops on walls. Post-teleport depenetration still pulls a held body that
+# landed through a wall back toward the player; it must not be left to the solver.
+const HELD_ENVIRONMENT_COLLISION_MASK := 384
 const PICKUP_ORIENT_TWEEN_DURATION := 0.05
 var _held_environment_mask_restore : Dictionary = {}
 
@@ -744,10 +745,10 @@ func _pickup_object_internal(which : PhysicsBody3D, ignore_grab_distance : bool)
 		if _xr_collision_hand and _xr_collision_hand.has_method("begin_pickup_settle"):
 			_xr_collision_hand.begin_pickup_settle()
 
-	# Brace/orient already strips world+thin-collider layers after the tween.
+	# Brace/orient already strips door + teleport-block after the tween.
 	# Primary one-hand holds never entered that path, so a long held item could
-	# still wedge in a frame. Same restore-on-drop as brace. Skip jointed
-	# bodies and in-progress orient.
+	# still wedge in a swinging panel. Same restore-on-drop as brace. Skip jointed
+	# bodies and in-progress orient. Static world is left on.
 	if _xr_collision_hand and not _orienting_pickup and not _is_jointed_body(which):
 		_apply_held_environment_collision_mask(which)
 
@@ -973,9 +974,9 @@ func _restore_dropped_body_collision(body: PhysicsBody3D) -> void:
 		body.collision_layer = _original_collision_layer
 	if _original_collision_mask != 0:
 		body.collision_mask = _original_collision_mask
-	# If env restore never made it to this hand, at least re-enable world bits.
-	elif (body.collision_mask & HELD_ENVIRONMENT_COLLISION_MASK) != HELD_ENVIRONMENT_COLLISION_MASK:
-		body.collision_mask |= HELD_ENVIRONMENT_COLLISION_MASK
+	# If env restore never made it to this hand, at least re-enable walls and panels.
+	elif (body.collision_mask & (HELD_ENVIRONMENT_COLLISION_MASK | 1)) != (HELD_ENVIRONMENT_COLLISION_MASK | 1):
+		body.collision_mask |= HELD_ENVIRONMENT_COLLISION_MASK | 1
 
 
 func _collect_orient_bodies(node: Node, bodies: Array[RigidBody3D]) -> void:

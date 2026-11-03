@@ -190,8 +190,10 @@ var visual_hold_grip : float = 1.0
 ## Physics layers to resolve against (defaults to static world + thin colliders; not teleport blockers).
 @export_flags_3d_physics var depenetration_collision_mask : int = 257
 
-## Held-item depenetration for jointed pickups (static frame + swinging panel only).
-@export_flags_3d_physics var held_depenetration_collision_mask : int = 384
+## Held-item depenetration: static world + teleport block + swinging panel.
+## Push is toward the player only, same as the hand, so a held body that overlaps
+## a wall after teleport comes back with the hand instead of staying on the far side.
+@export_flags_3d_physics var held_depenetration_collision_mask : int = 385
 
 ## Maximum translation applied per depenetration iteration.
 @export var max_depenetration_push : float = 1.0
@@ -1699,8 +1701,8 @@ func _unfreeze_teleported_held_bodies() -> void:
 ## The authored elbow marker lives on the IK arm, which follows the physics
 ## hand — after a forward teleport both ends can already be on the far side,
 ## so the elbow ray misses. Try elbow first (shorter, more conservative),
-## then the head (stays on the body side). Panel layer only; toward-head
-## like overlap. Held items keep colliding.
+## then the head (stays on the body side). Empty hands test swinging panels
+## only. A held body also tests static walls, still parking on the body side.
 func _resolve_elbow_line_obstruction() -> bool:
 	if _is_pickup_orienting():
 		return false
@@ -1725,7 +1727,12 @@ func _resolve_elbow_line_obstruction() -> bool:
 
 
 func _try_panel_line_obstruction(from: Vector3, to: Vector3) -> bool:
+	# Empty hand: swinging panels only (the previous wall-side fix).
+	# Held body: also static walls, so a long shape held out that lands fully
+	# past a thin wall is parked on this side with the hand. Push stays toward the body.
 	var panel_mask := depenetration_collision_mask & _PANEL_PHYSICS_LAYER
+	if _has_held_for_teleport():
+		panel_mask |= depenetration_collision_mask & 1
 	if panel_mask == 0:
 		return false
 
